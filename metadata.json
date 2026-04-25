@@ -1,0 +1,6 @@
+{
+  "name": "Image Splitter",
+  "description": "An application to split an image into multiple grid pieces and download them.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
