@@ -15,10 +15,10 @@ let clipsegTokenizerPromise: Promise<any> | null = null;
 
 function loadModels(useClipseg: boolean) {
   if (!rmbgModelPromise) {
-    rmbgModelPromise = AutoModel.from_pretrained(MODEL_ID, { config: { model_type: 'custom' } });
+    rmbgModelPromise = AutoModel.from_pretrained(MODEL_ID, { config: { model_type: 'custom' } as any });
   }
   if (!rmbgProcessorPromise) {
-    rmbgProcessorPromise = AutoProcessor.from_pretrained(MODEL_ID, { config: { model_type: 'custom' } });
+    rmbgProcessorPromise = AutoProcessor.from_pretrained(MODEL_ID, { config: { model_type: 'custom' } as any });
   }
   if (useClipseg) {
     if (!clipsegModelPromise) {
@@ -58,7 +58,7 @@ async function getClipsegMask(img: any, prompt: string): Promise<Uint8Array> {
   const tensor = new Tensor('uint8', out, tensorDims);
   
   const maskImg = await RawImage.fromTensor(tensor).resize(img.width, img.height);
-  return maskImg.data; // Uint8Array
+  return new Uint8Array(maskImg.data); // Uint8Array
 }
 
 export async function removeBackgroundV2(
