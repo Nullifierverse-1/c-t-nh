@@ -5,7 +5,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import JSZip from 'jszip';
-import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2 } from 'lucide-react';
+import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { removeBackgroundV2 } from './lib/bgRemoval';
 
@@ -25,18 +25,29 @@ export default function App() {
   const [currentTool, setCurrentTool] = useState<ToolType>('splitter');
   
   // -- Splitter State --
+  const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [downloadBaseName, setDownloadBaseName] = useState<string>('');
   
+  // -- Transform State --
+  const [originalSize, setOriginalSize] = useState<{width: number, height: number} | null>(null);
+  const [resizeWidth, setResizeWidth] = useState<string>("");
+  const [resizeHeight, setResizeHeight] = useState<string>("");
+  const [rotation, setRotation] = useState<number>(0);
+  const [maintainAspect, setMaintainAspect] = useState<boolean>(true);
+  const [isApplyingTransform, setIsApplyingTransform] = useState<boolean>(false);
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  
   const [columnsStr, setColumnsStr] = useState<string>("4");
   const [rowsStr, setRowsStr] = useState<string>("3");
-  const [vLinesPerRow, setVLinesPerRow] = useState<number[][]>([
-    [0.25, 0.5, 0.75],
-    [0.25, 0.5, 0.75],
-    [0.25, 0.5, 0.75]
+  const [vLinesPerRow, setVLinesPerRow] = useState<{pos: number, angle: number}[][]>([
+    [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}],
+    [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}],
+    [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}]
   ]);
   const [hLines, setHLines] = useState<number[]>([1/3, 2/3]);
+  const [selectedLine, setSelectedLine] = useState<{ rIdx: number, cIdx: number } | null>(null);
 
   const getTotalSlices = () => {
     let total = 0;
@@ -85,7 +96,17 @@ export default function App() {
     setImageFile(file);
     setDownloadBaseName(file.name.substring(0, file.name.lastIndexOf('.')) || 'image');
     const url = URL.createObjectURL(file);
+    setOriginalImageUrl(url);
     setImagePreviewUrl(url);
+    setRotation(0);
+    
+    const img = new Image();
+    img.onload = () => {
+      setOriginalSize({ width: img.width, height: img.height });
+      setResizeWidth(img.width.toString());
+      setResizeHeight(img.height.toString());
+    };
+    img.src = url;
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -113,6 +134,54 @@ export default function App() {
     }
   };
 
+  const applyTransform = async () => {
+    if (!originalImageUrl) return;
+    setIsApplyingTransform(true);
+    try {
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = reject;
+        img.src = originalImageUrl;
+      });
+      
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error("No 2d context");
+      
+      const rad = rotation * Math.PI / 180;
+      const absCos = Math.abs(Math.cos(rad));
+      const absSin = Math.abs(Math.sin(rad));
+      
+      const rWidth = parseInt(resizeWidth) || img.width;
+      const rHeight = parseInt(resizeHeight) || img.height;
+      
+      const newWidth = rWidth * absCos + rHeight * absSin;
+      const newHeight = rWidth * absSin + rHeight * absCos;
+      
+      canvas.width = newWidth;
+      canvas.height = newHeight;
+      
+      ctx.translate(newWidth / 2, newHeight / 2);
+      ctx.rotate(rad);
+      ctx.drawImage(img, -rWidth / 2, -rHeight / 2, rWidth, rHeight);
+      
+      canvas.toBlob((blob) => {
+        if (blob) {
+           if (imagePreviewUrl && imagePreviewUrl !== originalImageUrl) {
+              URL.revokeObjectURL(imagePreviewUrl);
+           }
+           const newUrl = URL.createObjectURL(blob);
+           setImagePreviewUrl(newUrl);
+        }
+        setIsApplyingTransform(false);
+      }, imageFile?.type || 'image/png');
+    } catch (err) {
+      console.error(err);
+      setIsApplyingTransform(false);
+    }
+  };
+
   const updateGridLines = (cStr: string, rStr: string) => {
     const c = parseFloat(cStr);
     const r = parseFloat(rStr);
@@ -125,10 +194,10 @@ export default function App() {
     }
     
     if (c > 0) {
-      let v: number[] = [];
+      let v: {pos: number, angle: number}[] = [];
       let step = 1 / c;
-      for (let i = step; i < 0.9999; i += step) v.push(i);
-      setVLinesPerRow(Array.from({ length: h.length + 1 }, () => [...v]));
+      for (let i = step; i < 0.9999; i += step) v.push({pos: i, angle: 0});
+      setVLinesPerRow(Array.from({ length: h.length + 1 }, () => v.map(l => ({...l}))));
     } else {
       setVLinesPerRow(Array.from({ length: h.length + 1 }, () => []));
     }
@@ -145,10 +214,11 @@ export default function App() {
     setRowsStr("3");
     setHLines([1/3, 2/3]);
     setVLinesPerRow([
-      [0.25, 0.5, 0.75],
-      [0.25, 0.5, 0.75],
-      [0.25, 0.5, 0.75]
+      [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}],
+      [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}],
+      [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}]
     ]);
+    setSelectedLine(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -185,24 +255,55 @@ export default function App() {
       const hPlacements = [0, ...[...hLines].sort((a,b)=>a-b), 1];
 
       let index = 1;
+      const W = img.width;
+      const H = img.height;
+
       for (let row = 0; row < hPlacements.length - 1; row++) {
         const rowVLines = vLinesPerRow[row] || [];
-        const vPlacements = [0, ...[...rowVLines].sort((a,b)=>a-b), 1];
+        const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
+        
+        const topY = hPlacements[row] * H;
+        const bottomY = hPlacements[row + 1] * H;
+        const centerY = (topY + bottomY) / 2;
+        
+        const getXAtY = (lineInfo: {pos: number, angle: number} | 'left' | 'right', y: number) => {
+            if (lineInfo === 'left') return 0;
+            if (lineInfo === 'right') return W;
+            const cx = lineInfo.pos * W;
+            const rad = lineInfo.angle * Math.PI / 180;
+            return cx - (y - centerY) * Math.tan(rad);
+        };
 
-        for (let col = 0; col < vPlacements.length - 1; col++) {
+        for (let col = 0; col <= sortedLines.length; col++) {
+           const leftLine = col === 0 ? 'left' : sortedLines[col - 1];
+           const rightLine = col === sortedLines.length ? 'right' : sortedLines[col];
+           
+           const tlX = Math.max(0, Math.min(W, getXAtY(leftLine, topY)));
+           const blX = Math.max(0, Math.min(W, getXAtY(leftLine, bottomY)));
+           const trX = Math.max(0, Math.min(W, getXAtY(rightLine, topY)));
+           const brX = Math.max(0, Math.min(W, getXAtY(rightLine, bottomY)));
+           
+           const minX = Math.max(0, Math.floor(Math.min(tlX, blX, trX, brX)));
+           const maxX = Math.min(W, Math.ceil(Math.max(tlX, blX, trX, brX)));
+           
            const slicePromise = new Promise<void>((resolve, reject) => {
-               const startX = vPlacements[col] * img.width;
-               const endX = vPlacements[col + 1] * img.width;
-               const startY = hPlacements[row] * img.height;
-               const endY = hPlacements[row + 1] * img.height;
+               const sliceW = Math.max(1, maxX - minX);
+               const sliceH = Math.max(1, Math.ceil(bottomY - topY));
                
-               const sliceWidth = Math.max(1, Math.round(endX - startX));
-               const sliceHeight = Math.max(1, Math.round(endY - startY));
-
-               canvas.width = sliceWidth;
-               canvas.height = sliceHeight;
-               ctx.clearRect(0, 0, sliceWidth, sliceHeight);
-               ctx.drawImage(img, Math.round(startX), Math.round(startY), sliceWidth, sliceHeight, 0, 0, sliceWidth, sliceHeight);
+               canvas.width = sliceW;
+               canvas.height = sliceH;
+               ctx.clearRect(0, 0, sliceW, sliceH);
+               
+               // Polygon crop for slanted cuts
+               ctx.beginPath();
+               ctx.moveTo(tlX - minX, 0);
+               ctx.lineTo(trX - minX, 0);
+               ctx.lineTo(brX - minX, sliceH);
+               ctx.lineTo(blX - minX, sliceH);
+               ctx.closePath();
+               ctx.clip();
+               
+               ctx.drawImage(img, minX, topY, sliceW, sliceH, 0, 0, sliceW, sliceH);
 
                canvas.toBlob((blob) => {
                  if (blob) {
@@ -485,7 +586,7 @@ export default function App() {
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative">
         
         {/* === SPLITTER MODE UI === */}
         {currentTool === 'splitter' && (
@@ -509,6 +610,141 @@ export default function App() {
                       />
                     </div>
                   </div>
+
+                  <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-4">Transform Properties</label>
+                  <div className="space-y-4 mb-8">
+                    <div>
+                      <div className="flex justify-between mb-2">
+                        <span className="text-sm font-medium">Rotation ({rotation}°)</span>
+                        <div className="flex gap-2">
+                          <button onClick={() => setRotation(r => (r - 90) % 360)} className="hover:text-indigo-400" title="Rotate -90°"><RotateCcw className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setRotation(r => (r + 90) % 360)} className="hover:text-indigo-400" title="Rotate +90°"><RotateCw className="w-3.5 h-3.5" /></button>
+                          <button onClick={() => setRotation(0)} className="hover:text-red-400" title="Reset angle"><RefreshCw className="w-3.5 h-3.5" /></button>
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min="-180"
+                        max="180"
+                        value={rotation}
+                        onChange={(e) => setRotation(parseInt(e.target.value))}
+                        className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                      />
+                    </div>
+                    
+                    <div className="flex gap-3">
+                      <div className="flex-1">
+                         <span className="text-sm font-medium mb-2 block">Width</span>
+                         <input
+                           type="number"
+                           value={resizeWidth}
+                           onChange={(e) => {
+                             const val = e.target.value;
+                             setResizeWidth(val);
+                             if (maintainAspect && originalSize && parseInt(val)) {
+                               setResizeHeight(Math.round(parseInt(val) * (originalSize.height / originalSize.width)).toString());
+                             }
+                           }}
+                           className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                         />
+                      </div>
+                      <div className="flex-1">
+                         <span className="text-sm font-medium mb-2 block">Height</span>
+                         <input
+                           type="number"
+                           value={resizeHeight}
+                           onChange={(e) => {
+                             const val = e.target.value;
+                             setResizeHeight(val);
+                             if (maintainAspect && originalSize && parseInt(val)) {
+                               setResizeWidth(Math.round(parseInt(val) * (originalSize.width / originalSize.height)).toString());
+                             }
+                           }}
+                           className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                         />
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <input 
+                        type="checkbox" 
+                        id="maintain" 
+                        checked={maintainAspect}
+                        onChange={(e) => setMaintainAspect(e.target.checked)}
+                        className="rounded border-slate-700 bg-slate-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-900"
+                      />
+                      <label htmlFor="maintain" className="text-xs text-slate-400 cursor-pointer">Lock aspect ratio</label>
+                    </div>
+
+                    <button
+                      onClick={applyTransform}
+                      disabled={isApplyingTransform}
+                      className="w-full py-2 bg-slate-700 hover:bg-slate-600 rounded text-xs font-semibold uppercase tracking-wider transition-colors disabled:opacity-50 mt-2"
+                    >
+                      {isApplyingTransform ? 'Applying...' : 'Apply Transform'}
+                    </button>
+                    
+                    <div className="text-[10px] text-slate-500 mt-2">
+                       Hint: First transform modifies the whole image.
+                    </div>
+                  </div>
+
+                  {selectedLine && (
+                    <>
+                      <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block mb-4 flex justify-between items-center">
+                        Column Line Angle
+                        <button onClick={() => setSelectedLine(null)} className="text-slate-500 hover:text-white" title="Deselect"><X className="w-4 h-4" /></button>
+                      </label>
+                      <div className="space-y-4 mb-8 p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-md">
+                        <div>
+                          <div className="flex justify-between mb-2">
+                            <span className="text-sm font-medium">Angle ({(() => {
+                               const row = vLinesPerRow[selectedLine.rIdx] || [];
+                               return row[selectedLine.cIdx]?.angle || 0;
+                            })()}°)</span>
+                            <div className="flex gap-2">
+                              <button onClick={() => {
+                                 setVLinesPerRow(prev => {
+                                    const next = [...prev];
+                                    const nextRow = [...(next[selectedLine.rIdx] || [])];
+                                    if(nextRow[selectedLine.cIdx]) {
+                                      nextRow[selectedLine.cIdx] = { ...nextRow[selectedLine.cIdx], angle: 0 };
+                                    }
+                                    next[selectedLine.rIdx] = nextRow;
+                                    return next;
+                                 });
+                              }} className="hover:text-red-400" title="Reset angle"><RefreshCw className="w-3.5 h-3.5" /></button>
+                            </div>
+                          </div>
+                          <input
+                            type="range"
+                            min="-75"
+                            max="75"
+                            value={(() => {
+                               const row = vLinesPerRow[selectedLine.rIdx] || [];
+                               return row[selectedLine.cIdx]?.angle || 0;
+                            })()}
+                            onChange={(e) => {
+                               const val = parseInt(e.target.value);
+                               setVLinesPerRow(prev => {
+                                  const next = [...prev];
+                                  const nextRow = [...(next[selectedLine.rIdx] || [])];
+                                  if(nextRow[selectedLine.cIdx]) {
+                                    nextRow[selectedLine.cIdx] = { ...nextRow[selectedLine.cIdx], angle: val };
+                                  }
+                                  next[selectedLine.rIdx] = nextRow;
+                                  return next;
+                               });
+                            }}
+                            className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                          />
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          Click a blue vertical line in the preview to select it and angle the cut.
+                        </div>
+                      </div>
+                    </>
+                  )}
 
                   <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-4">Grid Configuration</label>
                   <div className="space-y-6">
@@ -594,49 +830,65 @@ export default function App() {
             )}
 
             {/* Main Workspace */}
-            <main className="flex-1 bg-[#0f172a] p-8 md:p-12 flex items-center justify-center relative overflow-hidden">
+            <main className="flex-1 bg-[#0f172a] relative overflow-auto">
               {!imagePreviewUrl ? (
-                <motion.div 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="w-full max-w-lg"
-                >
-                  <div
-                    className={`relative flex flex-col items-center justify-center w-full min-h-[400px] border-2 border-dashed rounded-lg transition-all duration-300 ease-in-out cursor-pointer overflow-hidden ${
-                      dragActive ? 'border-indigo-500 bg-indigo-500/10 scale-[1.01]' : 'border-slate-600 bg-[#1e293b]/50 hover:border-slate-500 hover:bg-[#1e293b]'
-                    }`}
-                    onDragEnter={handleDrag}
-                    onDragLeave={handleDrag}
-                    onDragOver={handleDrag}
-                    onDrop={handleDrop}
-                    onClick={() => fileInputRef.current?.click()}
+                <div className="w-full h-full flex items-center justify-center p-8 md:p-12">
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="w-full max-w-lg"
                   >
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept="image/png, image/jpeg, image/webp"
-                      className="hidden"
-                      onChange={handleFileChange}
-                    />
-                    <div className="flex flex-col items-center text-center p-6 pointer-events-none">
-                      <div className="w-16 h-16 rounded-full bg-slate-800 text-indigo-400 flex items-center justify-center mb-6 shadow-sm border border-slate-700">
-                        <UploadCloud className="w-8 h-8" />
+                    <div
+                      className={`relative flex flex-col items-center justify-center w-full min-h-[400px] border-2 border-dashed rounded-lg transition-all duration-300 ease-in-out cursor-pointer overflow-hidden ${
+                        dragActive ? 'border-indigo-500 bg-indigo-500/10 scale-[1.01]' : 'border-slate-600 bg-[#1e293b]/50 hover:border-slate-500 hover:bg-[#1e293b]'
+                      }`}
+                      onDragEnter={handleDrag}
+                      onDragLeave={handleDrag}
+                      onDragOver={handleDrag}
+                      onDrop={handleDrop}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/png, image/jpeg, image/webp"
+                        className="hidden"
+                        onChange={handleFileChange}
+                      />
+                      <div className="flex flex-col items-center text-center p-6 pointer-events-none">
+                        <div className="w-16 h-16 rounded-full bg-slate-800 text-indigo-400 flex items-center justify-center mb-6 shadow-sm border border-slate-700">
+                          <UploadCloud className="w-8 h-8" />
+                        </div>
+                        <h3 className="text-xl font-semibold mb-2">Upload any image to split</h3>
+                        <p className="text-slate-400 max-w-xs mb-6 text-sm">
+                          Drag and drop your file here, or click to browse. Supports JPEG, PNG, and WebP.
+                        </p>
+                        <span className="px-5 py-2.5 bg-indigo-600 text-white rounded font-medium text-sm shadow-md hover:bg-indigo-500 transition-colors pointer-events-auto">
+                          Select File
+                        </span>
                       </div>
-                      <h3 className="text-xl font-semibold mb-2">Upload any image to split</h3>
-                      <p className="text-slate-400 max-w-xs mb-6 text-sm">
-                        Drag and drop your file here, or click to browse. Supports JPEG, PNG, and WebP.
-                      </p>
-                      <span className="px-5 py-2.5 bg-indigo-600 text-white rounded font-medium text-sm shadow-md hover:bg-indigo-500 transition-colors pointer-events-auto">
-                        Select File
-                      </span>
                     </div>
-                  </div>
-                </motion.div>
+                  </motion.div>
+                </div>
               ) : (
-                <>
+                <div 
+                  className="min-w-full min-h-full flex items-center justify-center p-8 md:p-12 transition-all"
+                  style={{
+                    width: zoomLevel > 1 ? `${zoomLevel * 100}%` : '100%',
+                    height: zoomLevel > 1 ? `${zoomLevel * 100}%` : '100%',
+                  }}
+                >
                   {/* Image Canvas Area */}
                   {previewMode === 'grid' ? (
-                    <div className="relative shadow-2xl rounded shadow-black/50 group max-w-full max-h-full flex overflow-hidden bg-slate-900 checkerboard-bg" ref={imageElementRef}>
+                    <div 
+                      className="relative shadow-2xl rounded shadow-black/50 group flex overflow-hidden bg-slate-900 checkerboard-bg" 
+                      ref={imageElementRef}
+                      style={{
+                         transform: `scale(${zoomLevel})`,
+                         transformOrigin: 'center center',
+                         transition: 'transform 0.2s ease-out'
+                      }}
+                    >
                       <img
                         src={imagePreviewUrl}
                         alt="Preview"
@@ -653,19 +905,33 @@ export default function App() {
                                const endH = hP[rIdx + 1];
                                const rowVLines = vLinesPerRow[rIdx] || [];
                                
-                               return rowVLines.map((v, cIdx) => (
-                                 <div
-                                   key={`v-${rIdx}-${cIdx}`}
-                                   className="absolute w-4 -ml-2 cursor-col-resize flex justify-center group/line z-10"
-                                   style={{ 
-                                      left: `${v * 100}%`,
-                                      top: `${startH * 100}%`,
-                                      height: `${(endH - startH) * 100}%`
+                               return (
+                                 <div 
+                                   key={`row-lines-${rIdx}`} 
+                                   className="absolute left-0 right-0 overflow-hidden pointer-events-none" 
+                                   style={{ top: `${startH * 100}%`, height: `${(endH - startH) * 100}%` }}
+                                 >
+                                   {rowVLines.map((v, cIdx) => {
+                                     const isSelected = selectedLine?.rIdx === rIdx && selectedLine?.cIdx === cIdx;
+                                     return (
+                                     <div
+                                       key={`v-${rIdx}-${cIdx}`}
+                                       className={`absolute w-8 -ml-4 cursor-col-resize flex justify-center group/line pointer-events-auto ${isSelected ? 'z-20' : 'z-10'}`}
+                                       style={{ 
+                                          left: `${v.pos * 100}%`,
+                                          top: `-50%`,
+                                          height: `200%`,
+                                          transform: `rotate(${v.angle}deg)`,
+                                          transformOrigin: 'center center'
+                                       }}
+                                   onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSelectedLine({ rIdx, cIdx });
                                    }}
                                    onMouseDown={(e) => {
                                      e.preventDefault();
                                      const startX = e.clientX;
-                                     const startVal = rowVLines[cIdx];
+                                     const startVal = rowVLines[cIdx].pos;
                                      const rect = imageElementRef.current!.getBoundingClientRect();
                                      const handleMouseMove = (me: MouseEvent) => {
                                        const delta = me.clientX - startX;
@@ -673,7 +939,7 @@ export default function App() {
                                        setVLinesPerRow(prev => {
                                            const next = [...prev];
                                            const nextRow = [...(next[rIdx] || [])];
-                                           nextRow[cIdx] = newVal;
+                                           nextRow[cIdx] = { ...nextRow[cIdx], pos: newVal };
                                            next[rIdx] = nextRow;
                                            return next;
                                        });
@@ -686,9 +952,12 @@ export default function App() {
                                      window.addEventListener('mouseup', handleMouseUp);
                                    }}
                                  >
-                                   <div className="w-[1.5px] h-full bg-blue-500/80 group-hover/line:bg-blue-400 group-hover/line:w-[3px] transition-all shadow-[0_0_3px_rgba(0,0,0,0.5)]"></div>
+                                    <div className={`w-[1.5px] h-full ${isSelected ? 'bg-indigo-400 shadow-[0_0_8px_theme(colors.indigo.500)] w-[3px]' : 'bg-blue-500/80 shadow-[0_0_3px_rgba(0,0,0,0.5)] group-hover/line:bg-blue-400 group-hover/line:w-[3px]'} transition-all pointer-events-none`}></div>
                                  </div>
-                               ));
+                               )})
+                                 }
+                                 </div>
+                               );
                              });
                           })()}
                           
@@ -730,7 +999,7 @@ export default function App() {
                       className="flex justify-center items-center h-[calc(100vh-12rem)] max-w-full w-full p-4"
                     >
                       <div 
-                        className="flex flex-col gap-3 p-2 rounded-xl bg-[#1e293b]/80 shadow-2xl overflow-hidden w-full h-full"
+                        className="relative w-full h-full"
                         style={{
                            aspectRatio: imageSize ? `${imageSize.width} / ${imageSize.height}` : 'auto',
                            maxHeight: '100%',
@@ -738,54 +1007,96 @@ export default function App() {
                         }}
                       >
                          {(() => {
-                            let hP = [0, ...[...hLines].sort((a,b)=>a-b), 1];
+                            if (!imageSize) return null;
+                            const hP = [0, ...[...hLines].sort((a,b)=>a-b), 1];
                             let sliceIndex = 0;
+                            const W = imageSize.width;
+                            const H = imageSize.height;
+
                             return hP.slice(0, -1).map((startH, rIdx) => {
                                 const endH = hP[rIdx + 1];
-                                const rowHeightPercent = (endH - startH) * 100;
-                                const rowVLines = vLinesPerRow[rIdx] || [];
-                                let vP = [0, ...[...rowVLines].sort((a,b)=>a-b), 1];
+                                const topY = startH * H;
+                                const bottomY = endH * H;
+                                const centerY = (topY + bottomY) / 2;
                                 
-                                return (
-                                    <div key={rIdx} className="flex gap-3 w-full" style={{ height: `${rowHeightPercent}%` }}>
-                                        {vP.slice(0, -1).map((startV, cIdx) => {
-                                            const endV = vP[cIdx + 1];
-                                            const colWidthPercent = (endV - startV) * 100;
-                                            
-                                            const bgPosX = vP.length > 2 ? (startV / (1 - (endV - startV))) * 100 : 0;
-                                            const bgPosY = hP.length > 2 ? (startH / (1 - (endH - startH))) * 100 : 0;
-                                            const bgSizeX = 1 / (endV - startV) * 100;
-                                            const bgSizeY = 1 / (endH - startH) * 100;
-                                            
-                                            const currIndex = sliceIndex++;
-                                            
-                                            return (
-                                              <div 
-                                                key={cIdx} 
-                                                className="relative overflow-hidden rounded bg-[#0f172a] checkerboard-bg transform transition-transform hover:scale-[1.02] shadow-md border border-slate-700/50 hover:border-indigo-500 hover:shadow-indigo-500/20"
-                                                style={{
-                                                  width: `${colWidthPercent}%`,
-                                                  backgroundImage: `url(${imagePreviewUrl})`,
-                                                  backgroundSize: `${isFinite(bgSizeX) ? bgSizeX : 0}% ${isFinite(bgSizeY) ? bgSizeY : 0}%`,
-                                                  backgroundPosition: `${isFinite(bgPosX) ? bgPosX : 0}% ${isFinite(bgPosY) ? bgPosY : 0}%`
-                                                }}
-                                              >
-                                                <span className="absolute top-1 left-1 text-[10px] bg-black/70 px-1.5 py-0.5 rounded text-white shadow-sm pointer-events-none backdrop-blur-sm">
-                                                  {currIndex + 1}
-                                                </span>
-                                              </div>
-                                            );
-                                        })}
-                                    </div>
-                                )
+                                const rowVLines = vLinesPerRow[rIdx] || [];
+                                const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
+                                
+                                const getXAtY = (lineInfo: {pos: number, angle: number} | 'left' | 'right', y: number) => {
+                                    if (lineInfo === 'left') return 0;
+                                    if (lineInfo === 'right') return W;
+                                    const cx = lineInfo.pos * W;
+                                    const rad = lineInfo.angle * Math.PI / 180;
+                                    return cx - (y - centerY) * Math.tan(rad);
+                                };
+
+                                return sortedLines.concat('right' as any).map((rightLine, cIdx) => {
+                                    const leftLine = cIdx === 0 ? 'left' : sortedLines[cIdx - 1];
+                                    
+                                    const tlX = Math.max(0, Math.min(W, getXAtY(leftLine as any, topY)));
+                                    const blX = Math.max(0, Math.min(W, getXAtY(leftLine as any, bottomY)));
+                                    const trX = Math.max(0, Math.min(W, getXAtY(rightLine as any, topY)));
+                                    const brX = Math.max(0, Math.min(W, getXAtY(rightLine as any, bottomY)));
+                                    
+                                    const minX = Math.floor(Math.min(tlX, blX, trX, brX));
+                                    const maxX = Math.ceil(Math.max(tlX, blX, trX, brX));
+                                    
+                                    const sliceW = Math.max(1, maxX - minX);
+                                    const sliceH = Math.max(1, bottomY - topY);
+                                    
+                                    const currIndex = sliceIndex++;
+                                    
+                                    const explodeX = (cIdx - sortedLines.length / 2) * 12;
+                                    const explodeY = (rIdx - (hP.length - 1) / 2) * 12;
+
+                                    const pTL = { x: ((tlX - minX) / sliceW) * 100, y: 0 };
+                                    const pTR = { x: ((trX - minX) / sliceW) * 100, y: 0 };
+                                    const pBR = { x: ((brX - minX) / sliceW) * 100, y: 100 };
+                                    const pBL = { x: ((blX - minX) / sliceW) * 100, y: 100 };
+                                    
+                                    const bgPosX = Math.abs(W - sliceW) < 0.1 ? 0 : (minX / (W - sliceW)) * 100;
+                                    const bgPosY = Math.abs(H - sliceH) < 0.1 ? 0 : (topY / (H - sliceH)) * 100;
+
+                                    return (
+                                      <div 
+                                        key={`${rIdx}-${cIdx}`} 
+                                        className="absolute overflow-hidden rounded-sm bg-[#0f172a] checkerboard-bg transform transition-transform hover:scale-[1.02] shadow-md border hover:border-indigo-500 hover:shadow-indigo-500/20"
+                                        style={{
+                                          left: `${(minX / W) * 100}%`,
+                                          top: `${(topY / H) * 100}%`,
+                                          width: `${(sliceW / W) * 100}%`,
+                                          height: `${(sliceH / H) * 100}%`,
+                                          transform: `translate(${explodeX}px, ${explodeY}px)`,
+                                          clipPath: `polygon(${pTL.x}% ${pTL.y}%, ${pTR.x}% ${pTR.y}%, ${pBR.x}% ${pBR.y}%, ${pBL.x}% ${pBL.y}%)`,
+                                          backgroundImage: `url(${imagePreviewUrl})`,
+                                          backgroundSize: `${ (W / sliceW) * 100 }% ${ (H / sliceH) * 100 }%`,
+                                          backgroundPosition: `${bgPosX}% ${bgPosY}%`
+                                        }}
+                                      >
+                                        <span className="absolute top-1 left-1 text-[10px] bg-black/70 px-1.5 py-0.5 rounded text-white shadow-sm pointer-events-none backdrop-blur-sm z-10">
+                                          {currIndex + 1}
+                                        </span>
+                                      </div>
+                                    );
+                                });
                             });
                          })()}
                       </div>
                     </div>
                   )}
-                </>
+                </div>
               )}
             </main>
+
+            {imagePreviewUrl && currentTool === 'splitter' && (
+              <div className="absolute bottom-8 right-8 z-50 flex bg-[#1e293b] border border-slate-700 rounded-lg shadow-2xl p-1 gap-1 items-center">
+                <button onClick={() => setZoomLevel(z => Math.max(0.25, z - 0.25))} className="p-1.5 hover:bg-slate-700 rounded text-slate-300 hover:text-white" title="Zoom Out"><ZoomOut className="w-5 h-5"/></button>
+                <span className="text-xs font-mono w-12 text-center text-slate-300">{Math.round(zoomLevel * 100)}%</span>
+                <button onClick={() => setZoomLevel(z => Math.min(5, z + 0.25))} className="p-1.5 hover:bg-slate-700 rounded text-slate-300 hover:text-white" title="Zoom In"><ZoomIn className="w-5 h-5"/></button>
+                <div className="w-px h-5 bg-slate-700 mx-1"></div>
+                <button onClick={() => setZoomLevel(1)} className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-white" title="Fit to Screen"><RefreshCw className="w-4 h-4"/></button>
+              </div>
+            )}
           </>
         )}
 
