@@ -5,7 +5,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import JSZip from 'jszip';
-import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut } from 'lucide-react';
+import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { removeBackgroundV2 } from './lib/bgRemoval';
 
@@ -19,6 +19,12 @@ type BgFile = {
   resultBlob?: Blob;
   resultUrl?: string;
   errorMsg?: string;
+};
+
+type PieceTransform = {
+  rotation: number; 
+  flipH: boolean;
+  flipV: boolean;
 };
 
 export default function App() {
@@ -38,6 +44,7 @@ export default function App() {
   const [maintainAspect, setMaintainAspect] = useState<boolean>(true);
   const [isApplyingTransform, setIsApplyingTransform] = useState<boolean>(false);
   const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [pieceTransforms, setPieceTransforms] = useState<Record<number, PieceTransform>>({});
   
   const [columnsStr, setColumnsStr] = useState<string>("4");
   const [rowsStr, setRowsStr] = useState<string>("3");
@@ -201,6 +208,7 @@ export default function App() {
     } else {
       setVLinesPerRow(Array.from({ length: h.length + 1 }, () => []));
     }
+    setPieceTransforms({});
   };
 
   const handleReset = () => {
@@ -219,6 +227,7 @@ export default function App() {
       [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}]
     ]);
     setSelectedLine(null);
+    setPieceTransforms({});
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -290,10 +299,19 @@ export default function App() {
                const sliceW = Math.max(1, maxX - minX);
                const sliceH = Math.max(1, Math.ceil(bottomY - topY));
                
+               const pieceIndexKey = index - 1;
+               const t = pieceTransforms[pieceIndexKey] || { rotation: 0, flipH: false, flipV: false };
+
                canvas.width = sliceW;
                canvas.height = sliceH;
                ctx.clearRect(0, 0, sliceW, sliceH);
                
+               ctx.save();
+               ctx.translate(sliceW / 2, sliceH / 2);
+               ctx.rotate((t.rotation || 0) * Math.PI / 180);
+               ctx.scale(t.flipH ? -1 : 1, t.flipV ? -1 : 1);
+               ctx.translate(-sliceW / 2, -sliceH / 2);
+
                // Polygon crop for slanted cuts
                ctx.beginPath();
                ctx.moveTo(tlX - minX, 0);
@@ -304,6 +322,7 @@ export default function App() {
                ctx.clip();
                
                ctx.drawImage(img, minX, topY, sliceW, sliceH, 0, 0, sliceW, sliceH);
+               ctx.restore();
 
                canvas.toBlob((blob) => {
                  if (blob) {
@@ -1045,6 +1064,7 @@ export default function App() {
                                     const sliceH = Math.max(1, bottomY - topY);
                                     
                                     const currIndex = sliceIndex++;
+                                    const transformData = pieceTransforms[currIndex] || { rotation: 0, flipH: false, flipV: false };
                                     
                                     const explodeX = (cIdx - sortedLines.length / 2) * 12;
                                     const explodeY = (rIdx - (hP.length - 1) / 2) * 12;
@@ -1057,22 +1077,75 @@ export default function App() {
                                     const bgPosX = Math.abs(W - sliceW) < 0.1 ? 0 : (minX / (W - sliceW)) * 100;
                                     const bgPosY = Math.abs(H - sliceH) < 0.1 ? 0 : (topY / (H - sliceH)) * 100;
 
+                                    const updatePieceTransform = (updates: Partial<PieceTransform>) => {
+                                      setPieceTransforms(prev => ({
+                                        ...prev,
+                                        [currIndex]: {
+                                          ...(prev[currIndex] || { rotation: 0, flipH: false, flipV: false }),
+                                          ...updates
+                                        }
+                                      }));
+                                    };
+
                                     return (
                                       <div 
                                         key={`${rIdx}-${cIdx}`} 
-                                        className="absolute overflow-hidden rounded-sm bg-[#0f172a] checkerboard-bg transform transition-transform hover:scale-[1.02] shadow-md border hover:border-indigo-500 hover:shadow-indigo-500/20"
+                                        className="absolute overflow-hidden rounded-sm bg-[#0f172a] checkerboard-bg group/piece shadow-md border hover:border-indigo-500 hover:shadow-indigo-500/20"
                                         style={{
                                           left: `${(minX / W) * 100}%`,
                                           top: `${(topY / H) * 100}%`,
                                           width: `${(sliceW / W) * 100}%`,
                                           height: `${(sliceH / H) * 100}%`,
                                           transform: `translate(${explodeX}px, ${explodeY}px)`,
-                                          clipPath: `polygon(${pTL.x}% ${pTL.y}%, ${pTR.x}% ${pTR.y}%, ${pBR.x}% ${pBR.y}%, ${pBL.x}% ${pBL.y}%)`,
-                                          backgroundImage: `url(${imagePreviewUrl})`,
-                                          backgroundSize: `${ (W / sliceW) * 100 }% ${ (H / sliceH) * 100 }%`,
-                                          backgroundPosition: `${bgPosX}% ${bgPosY}%`
+                                          zIndex: 1
                                         }}
                                       >
+                                        <div 
+                                          className="w-full h-full transition-transform duration-300"
+                                          style={{
+                                            clipPath: `polygon(${pTL.x}% ${pTL.y}%, ${pTR.x}% ${pTR.y}%, ${pBR.x}% ${pBR.y}%, ${pBL.x}% ${pBL.y}%)`,
+                                            backgroundImage: `url(${imagePreviewUrl})`,
+                                            backgroundSize: `${ (W / sliceW) * 100 }% ${ (H / sliceH) * 100 }%`,
+                                            backgroundPosition: `${bgPosX}% ${bgPosY}%`,
+                                            transform: `rotate(${transformData.rotation}deg) scale(${transformData.flipH ? -1 : 1}, ${transformData.flipV ? -1 : 1})`,
+                                          }}
+                                        />
+                                        
+                                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/piece:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
+                                          <div className="flex gap-2">
+                                            <button 
+                                              onClick={() => updatePieceTransform({ rotation: (transformData.rotation - 90) % 360 })}
+                                              className="p-1.5 bg-slate-800/80 hover:bg-slate-700 rounded text-white"
+                                              title="Rotate Left"
+                                            >
+                                              <RotateCcw className="w-4 h-4" />
+                                            </button>
+                                            <button 
+                                              onClick={() => updatePieceTransform({ rotation: (transformData.rotation + 90) % 360 })}
+                                              className="p-1.5 bg-slate-800/80 hover:bg-slate-700 rounded text-white"
+                                              title="Rotate Right"
+                                            >
+                                              <RotateCw className="w-4 h-4" />
+                                            </button>
+                                          </div>
+                                          <div className="flex gap-2">
+                                            <button 
+                                              onClick={() => updatePieceTransform({ flipH: !transformData.flipH })}
+                                              className={`p-1.5 rounded text-white ${transformData.flipH ? 'bg-indigo-600' : 'bg-slate-800/80 hover:bg-slate-700'}`}
+                                              title="Flip Horizontal"
+                                            >
+                                              <FlipHorizontal className="w-4 h-4" />
+                                            </button>
+                                            <button 
+                                              onClick={() => updatePieceTransform({ flipV: !transformData.flipV })}
+                                              className={`p-1.5 rounded text-white ${transformData.flipV ? 'bg-indigo-600' : 'bg-slate-800/80 hover:bg-slate-700'}`}
+                                              title="Flip Vertical"
+                                            >
+                                              <FlipVertical className="w-4 h-4" />
+                                            </button>
+                                          </div>
+                                        </div>
+
                                         <span className="absolute top-1 left-1 text-[10px] bg-black/70 px-1.5 py-0.5 rounded text-white shadow-sm pointer-events-none backdrop-blur-sm z-10">
                                           {currIndex + 1}
                                         </span>
