@@ -45,6 +45,7 @@ export default function App() {
   const [isApplyingTransform, setIsApplyingTransform] = useState<boolean>(false);
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [pieceTransforms, setPieceTransforms] = useState<Record<number, PieceTransform>>({});
+  const [selectedPieces, setSelectedPieces] = useState<Set<number>>(new Set());
   
   const [columnsStr, setColumnsStr] = useState<string>("4");
   const [rowsStr, setRowsStr] = useState<string>("3");
@@ -228,6 +229,7 @@ export default function App() {
     ]);
     setSelectedLine(null);
     setPieceTransforms({});
+    setSelectedPieces(new Set());
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -267,6 +269,8 @@ export default function App() {
       const W = img.width;
       const H = img.height;
 
+      const slicesToDownload = selectedPieces.size > 0 ? selectedPieces : null;
+      
       for (let row = 0; row < hPlacements.length - 1; row++) {
         const rowVLines = vLinesPerRow[row] || [];
         const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
@@ -284,76 +288,81 @@ export default function App() {
         };
 
         for (let col = 0; col <= sortedLines.length; col++) {
-           const leftLine = col === 0 ? 'left' : sortedLines[col - 1];
-           const rightLine = col === sortedLines.length ? 'right' : sortedLines[col];
+           const currIndexZeroBased = index - 1;
+           const shouldDownload = !slicesToDownload || slicesToDownload.has(currIndexZeroBased);
            
-           const tlX = Math.max(0, Math.min(W, getXAtY(leftLine, topY)));
-           const blX = Math.max(0, Math.min(W, getXAtY(leftLine, bottomY)));
-           const trX = Math.max(0, Math.min(W, getXAtY(rightLine, topY)));
-           const brX = Math.max(0, Math.min(W, getXAtY(rightLine, bottomY)));
-           
-           const minX = Math.max(0, Math.floor(Math.min(tlX, blX, trX, brX)));
-           const maxX = Math.min(W, Math.ceil(Math.max(tlX, blX, trX, brX)));
-           
-           const slicePromise = new Promise<void>((resolve, reject) => {
-               const sliceW = Math.max(1, maxX - minX);
-               const sliceH = Math.max(1, Math.ceil(bottomY - topY));
-               
-               const pieceIndexKey = index - 1;
-               const t = pieceTransforms[pieceIndexKey] || { rotation: 0, flipH: false, flipV: false };
-
-               canvas.width = sliceW;
-               canvas.height = sliceH;
-               ctx.clearRect(0, 0, sliceW, sliceH);
-               
-               ctx.save();
-               ctx.translate(sliceW / 2, sliceH / 2);
-               ctx.rotate((t.rotation || 0) * Math.PI / 180);
-               ctx.scale(t.flipH ? -1 : 1, t.flipV ? -1 : 1);
-               ctx.translate(-sliceW / 2, -sliceH / 2);
-
-               // Polygon crop for slanted cuts
-               ctx.beginPath();
-               ctx.moveTo(tlX - minX, 0);
-               ctx.lineTo(trX - minX, 0);
-               ctx.lineTo(brX - minX, sliceH);
-               ctx.lineTo(blX - minX, sliceH);
-               ctx.closePath();
-               ctx.clip();
-               
-               ctx.drawImage(img, minX, topY, sliceW, sliceH, 0, 0, sliceW, sliceH);
-               ctx.restore();
-
-               canvas.toBlob((blob) => {
-                 if (blob) {
-                   const indexStr = index.toString().padStart(2, '0');
-                   const fileName = `${baseName}_slice_${indexStr}.png`;
-                   
-                   if (downloadAsZip) {
-                     imgFolder!.file(fileName, blob);
+           if (shouldDownload) {
+             const leftLine = col === 0 ? 'left' : sortedLines[col - 1];
+             const rightLine = col === sortedLines.length ? 'right' : sortedLines[col];
+             
+             const tlX = Math.max(0, Math.min(W, getXAtY(leftLine, topY)));
+             const blX = Math.max(0, Math.min(W, getXAtY(leftLine, bottomY)));
+             const trX = Math.max(0, Math.min(W, getXAtY(rightLine, topY)));
+             const brX = Math.max(0, Math.min(W, getXAtY(rightLine, bottomY)));
+             
+             const minX = Math.max(0, Math.floor(Math.min(tlX, blX, trX, brX)));
+             const maxX = Math.min(W, Math.ceil(Math.max(tlX, blX, trX, brX)));
+             
+             const slicePromise = new Promise<void>((resolve, reject) => {
+                 const sliceW = Math.max(1, maxX - minX);
+                 const sliceH = Math.max(1, Math.ceil(bottomY - topY));
+                 
+                 const pieceIndexKey = index - 1;
+                 const t = pieceTransforms[pieceIndexKey] || { rotation: 0, flipH: false, flipV: false };
+  
+                 canvas.width = sliceW;
+                 canvas.height = sliceH;
+                 ctx.clearRect(0, 0, sliceW, sliceH);
+                 
+                 ctx.save();
+                 ctx.translate(sliceW / 2, sliceH / 2);
+                 ctx.rotate((t.rotation || 0) * Math.PI / 180);
+                 ctx.scale(t.flipH ? -1 : 1, t.flipV ? -1 : 1);
+                 ctx.translate(-sliceW / 2, -sliceH / 2);
+  
+                 // Polygon crop for slanted cuts
+                 ctx.beginPath();
+                 ctx.moveTo(tlX - minX, 0);
+                 ctx.lineTo(trX - minX, 0);
+                 ctx.lineTo(brX - minX, sliceH);
+                 ctx.lineTo(blX - minX, sliceH);
+                 ctx.closePath();
+                 ctx.clip();
+                 
+                 ctx.drawImage(img, minX, topY, sliceW, sliceH, 0, 0, sliceW, sliceH);
+                 ctx.restore();
+  
+                 canvas.toBlob((blob) => {
+                   if (blob) {
+                     const indexStr = index.toString().padStart(2, '0');
+                     const fileName = `${baseName}_slice_${indexStr}.png`;
+                     
+                     if (downloadAsZip) {
+                       imgFolder!.file(fileName, blob);
+                     } else {
+                       const downloadUrl = URL.createObjectURL(blob);
+                       const tempLink = document.createElement('a');
+                       tempLink.href = downloadUrl;
+                       tempLink.download = fileName;
+                       document.body.appendChild(tempLink);
+                       tempLink.click();
+                       document.body.removeChild(tempLink);
+                       // small timeout to allow browser to register the download before revoking
+                       setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
+                     }
+                     resolve();
                    } else {
-                     const downloadUrl = URL.createObjectURL(blob);
-                     const tempLink = document.createElement('a');
-                     tempLink.href = downloadUrl;
-                     tempLink.download = fileName;
-                     document.body.appendChild(tempLink);
-                     tempLink.click();
-                     document.body.removeChild(tempLink);
-                     // small timeout to allow browser to register the download before revoking
-                     setTimeout(() => URL.revokeObjectURL(downloadUrl), 100);
+                     reject(new Error(`Failed to create blob for slice ${row},${col}`));
                    }
-                   resolve();
-                 } else {
-                   reject(new Error(`Failed to create blob for slice ${row},${col}`));
-                 }
-               }, imageFile.type === 'image/jpeg' ? 'image/jpeg' : 'image/png');
-           });
-           
-           if (!downloadAsZip) {
-               await slicePromise; // await sequentially to avoid browser blocking multiple rapid downloads
-               await new Promise(r => setTimeout(r, 50)); 
-           } else {
-               slicePromises.push(slicePromise);
+                 }, imageFile.type === 'image/jpeg' ? 'image/jpeg' : 'image/png');
+             });
+             
+             if (!downloadAsZip) {
+                 await slicePromise; // await sequentially to avoid browser blocking multiple rapid downloads
+                 await new Promise(r => setTimeout(r, 50)); 
+             } else {
+                 slicePromises.push(slicePromise);
+             }
            }
            
            index++;
@@ -577,9 +586,20 @@ export default function App() {
                 {isProcessing ? (
                   <><RefreshCw className="w-4 h-4 animate-spin" /> Processing...</>
                 ) : (
-                  <>Download All ({totalSlices})</>
+                  <>
+                    {selectedPieces.size > 0 ? `Download Selected (${selectedPieces.size})` : `Download All (${totalSlices})`}
+                  </>
                 )}
               </button>
+              
+              {selectedPieces.size > 0 && (
+                <button 
+                  onClick={() => setSelectedPieces(new Set())}
+                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium transition-colors"
+                >
+                  Clear Selection
+                </button>
+              )}
             </>
           )}
 
@@ -1065,6 +1085,7 @@ export default function App() {
                                     
                                     const currIndex = sliceIndex++;
                                     const transformData = pieceTransforms[currIndex] || { rotation: 0, flipH: false, flipV: false };
+                                    const isSelected = selectedPieces.has(currIndex);
                                     
                                     const explodeX = (cIdx - sortedLines.length / 2) * 12;
                                     const explodeY = (rIdx - (hP.length - 1) / 2) * 12;
@@ -1077,7 +1098,8 @@ export default function App() {
                                     const bgPosX = Math.abs(W - sliceW) < 0.1 ? 0 : (minX / (W - sliceW)) * 100;
                                     const bgPosY = Math.abs(H - sliceH) < 0.1 ? 0 : (topY / (H - sliceH)) * 100;
 
-                                    const updatePieceTransform = (updates: Partial<PieceTransform>) => {
+                                    const updatePieceTransform = (e: React.MouseEvent, updates: Partial<PieceTransform>) => {
+                                      e.stopPropagation();
                                       setPieceTransforms(prev => ({
                                         ...prev,
                                         [currIndex]: {
@@ -1087,17 +1109,26 @@ export default function App() {
                                       }));
                                     };
 
+                                    const toggleSelection = () => {
+                                      setSelectedPieces(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(currIndex)) next.delete(currIndex);
+                                        else next.add(currIndex);
+                                        return next;
+                                      });
+                                    };
+
                                     return (
                                       <div 
                                         key={`${rIdx}-${cIdx}`} 
-                                        className="absolute overflow-hidden rounded-sm bg-[#0f172a] checkerboard-bg group/piece shadow-md border hover:border-indigo-500 hover:shadow-indigo-500/20"
+                                        onClick={toggleSelection}
+                                        className={`absolute overflow-hidden rounded-sm bg-[#0f172a] checkerboard-bg group/piece shadow-md border cursor-pointer transition-all ${isSelected ? 'ring-2 ring-indigo-500 border-indigo-500 scale-[1.05] z-10' : 'hover:border-indigo-500/50 hover:shadow-indigo-500/20'}`}
                                         style={{
                                           left: `${(minX / W) * 100}%`,
                                           top: `${(topY / H) * 100}%`,
                                           width: `${(sliceW / W) * 100}%`,
                                           height: `${(sliceH / H) * 100}%`,
                                           transform: `translate(${explodeX}px, ${explodeY}px)`,
-                                          zIndex: 1
                                         }}
                                       >
                                         <div 
@@ -1111,17 +1142,24 @@ export default function App() {
                                           }}
                                         />
                                         
+                                        {/* Selection indicator */}
+                                        {isSelected && (
+                                          <div className="absolute top-1 right-1 bg-indigo-500 text-white rounded-full p-0.5 z-20 shadow-lg">
+                                            <CheckCircle2 className="w-3 h-3" />
+                                          </div>
+                                        )}
+
                                         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/piece:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
                                           <div className="flex gap-2">
                                             <button 
-                                              onClick={() => updatePieceTransform({ rotation: (transformData.rotation - 90) % 360 })}
+                                              onClick={(e) => updatePieceTransform(e, { rotation: (transformData.rotation - 90) % 360 })}
                                               className="p-1.5 bg-slate-800/80 hover:bg-slate-700 rounded text-white"
                                               title="Rotate Left"
                                             >
                                               <RotateCcw className="w-4 h-4" />
                                             </button>
                                             <button 
-                                              onClick={() => updatePieceTransform({ rotation: (transformData.rotation + 90) % 360 })}
+                                              onClick={(e) => updatePieceTransform(e, { rotation: (transformData.rotation + 90) % 360 })}
                                               className="p-1.5 bg-slate-800/80 hover:bg-slate-700 rounded text-white"
                                               title="Rotate Right"
                                             >
@@ -1130,14 +1168,14 @@ export default function App() {
                                           </div>
                                           <div className="flex gap-2">
                                             <button 
-                                              onClick={() => updatePieceTransform({ flipH: !transformData.flipH })}
+                                              onClick={(e) => updatePieceTransform(e, { flipH: !transformData.flipH })}
                                               className={`p-1.5 rounded text-white ${transformData.flipH ? 'bg-indigo-600' : 'bg-slate-800/80 hover:bg-slate-700'}`}
                                               title="Flip Horizontal"
                                             >
                                               <FlipHorizontal className="w-4 h-4" />
                                             </button>
                                             <button 
-                                              onClick={() => updatePieceTransform({ flipV: !transformData.flipV })}
+                                              onClick={(e) => updatePieceTransform(e, { flipV: !transformData.flipV })}
                                               className={`p-1.5 rounded text-white ${transformData.flipV ? 'bg-indigo-600' : 'bg-slate-800/80 hover:bg-slate-700'}`}
                                               title="Flip Vertical"
                                             >
