@@ -5,11 +5,12 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import JSZip from 'jszip';
-import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical } from 'lucide-react';
+import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical, Sparkles, Wand2, Maximize2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { GoogleGenAI } from "@google/genai";
 import { removeBackgroundV2 } from './lib/bgRemoval';
 
-type ToolType = 'splitter' | 'bg-remover';
+type ToolType = 'splitter' | 'bg-remover' | 'ai-expand';
 
 type BgFile = {
   id: string;
@@ -34,6 +35,7 @@ export default function App() {
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
   const [downloadBaseName, setDownloadBaseName] = useState<string>('');
   
   // -- Transform State --
@@ -46,6 +48,19 @@ export default function App() {
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [pieceTransforms, setPieceTransforms] = useState<Record<number, PieceTransform>>({});
   const [selectedPieces, setSelectedPieces] = useState<Set<number>>(new Set());
+  const [isUpscaling, setIsUpscaling] = useState<boolean>(false);
+  const [isSharpening, setIsSharpening] = useState<boolean>(false);
+  const [isExpandingAI, setIsExpandingAI] = useState<boolean>(false);
+  const [expandWidth, setExpandWidth] = useState<string>("1920");
+  const [expandHeight, setExpandHeight] = useState<string>("1080");
+  const [expandPrompt, setExpandPrompt] = useState<string>("Professional high-quality outpainting, extend the background seamlessly to match the original style and content.");
+  const [expandOffsets, setExpandOffsets] = useState<{top: number, bottom: number, left: number, right: number}>({top: 0, bottom: 0, left: 0, right: 0});
+  useEffect(() => {
+    if (imageSize) {
+      setExpandWidth((imageSize.width + expandOffsets.left + expandOffsets.right).toString());
+      setExpandHeight((imageSize.height + expandOffsets.top + expandOffsets.bottom).toString());
+    }
+  }, [imageSize, expandOffsets]);
   
   const [columnsStr, setColumnsStr] = useState<string>("4");
   const [rowsStr, setRowsStr] = useState<string>("3");
@@ -70,7 +85,6 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState<boolean>(false);
-  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
 
   // -- BG Remover State --
   const [bgFiles, setBgFiles] = useState<BgFile[]>([]);
@@ -97,6 +111,7 @@ export default function App() {
 
   const processFile = (file: File) => {
     setError(null);
+    setPreviewMode('grid');
     if (!file.type.startsWith('image/')) {
       setError('Please select a valid image file (JPEG, PNG, WebP).');
       return;
@@ -111,6 +126,7 @@ export default function App() {
     const img = new Image();
     img.onload = () => {
       setOriginalSize({ width: img.width, height: img.height });
+      setImageSize({ width: img.width, height: img.height });
       setResizeWidth(img.width.toString());
       setResizeHeight(img.height.toString());
     };
@@ -122,6 +138,31 @@ export default function App() {
       processFile(e.target.files[0]);
     }
   };
+
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      // Don't paste if user is typing in an input or textarea
+      if (['INPUT', 'TEXTAREA'].includes((document.activeElement as HTMLElement)?.tagName)) {
+        return;
+      }
+
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const blob = items[i].getAsFile();
+          if (blob) {
+            processFile(blob);
+            break;
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, []);
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -164,15 +205,18 @@ export default function App() {
       const rWidth = parseInt(resizeWidth) || img.width;
       const rHeight = parseInt(resizeHeight) || img.height;
       
-      const newWidth = rWidth * absCos + rHeight * absSin;
-      const newHeight = rWidth * absSin + rHeight * absCos;
+      const newWidth = Math.round(rWidth * absCos + rHeight * absSin);
+      const newHeight = Math.round(rWidth * absSin + rHeight * absCos);
       
       canvas.width = newWidth;
       canvas.height = newHeight;
       
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      
       ctx.translate(newWidth / 2, newHeight / 2);
       ctx.rotate(rad);
-      ctx.drawImage(img, -rWidth / 2, -rHeight / 2, rWidth, rHeight);
+      ctx.drawImage(img, -Math.round(rWidth / 2), -Math.round(rHeight / 2), rWidth, rHeight);
       
       canvas.toBlob((blob) => {
         if (blob) {
@@ -183,7 +227,7 @@ export default function App() {
            setImagePreviewUrl(newUrl);
         }
         setIsApplyingTransform(false);
-      }, imageFile?.type || 'image/png');
+      }, imageFile?.type || 'image/png', 1.0);
     } catch (err) {
       console.error(err);
       setIsApplyingTransform(false);
@@ -230,6 +274,7 @@ export default function App() {
     setSelectedLine(null);
     setPieceTransforms({});
     setSelectedPieces(new Set());
+    setPreviewMode('grid');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -245,8 +290,228 @@ export default function App() {
       const ctx = canvas.getContext('2d');
 
       if (!ctx) throw new Error('Could not get 2d context from canvas');
+      
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
 
       return { img, ctx, canvas };
+  };
+
+  const handleUpscale = () => {
+    if (!imageFile || !imageSize) return;
+    setIsUpscaling(true);
+    
+    const img = new Image();
+    img.src = imagePreviewUrl!;
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const newW = imageSize.width * 2;
+      const newH = imageSize.height * 2;
+      canvas.width = newW;
+      canvas.height = newH;
+      
+      // Better quality upscale
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, newW, newH);
+      
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const file = new File([blob], imageFile.name.replace(/\.[^/.]+$/, "") + "_upscaled.png", { type: 'image/png' });
+          processFile(file);
+        }
+        setIsUpscaling(false);
+      }, 'image/png');
+    };
+  };
+
+  const handleSharpen = () => {
+    if (!imageFile || !imagePreviewUrl) return;
+    setIsSharpening(true);
+
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = imagePreviewUrl;
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        setIsSharpening(false);
+        return;
+      }
+
+      const w = img.width;
+      const h = img.height;
+      canvas.width = w;
+      canvas.height = h;
+      ctx.drawImage(img, 0, 0);
+
+      const imageData = ctx.getImageData(0, 0, w, h);
+      const pixels = imageData.data;
+      const copy = new Uint8ClampedArray(pixels);
+
+      // Sharpen Kernel (Laplacian-like)
+      // [ 0  -1   0]
+      // [-1   5  -1]
+      // [ 0  -1   0]
+      const kernel = [
+        0, -1,  0,
+       -1,  5, -1,
+        0, -1,  0
+      ];
+
+      for (let i = 0; i < pixels.length; i += 4) {
+        let r = 0, g = 0, b = 0;
+        const x = (i / 4) % w;
+        const y = Math.floor((i / 4) / w);
+
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const scy = Math.min(h - 1, Math.max(0, y + ky));
+            const scx = Math.min(w - 1, Math.max(0, x + kx));
+            const srcOff = (scy * w + scx) * 4;
+            const weight = kernel[(ky + 1) * 3 + (kx + 1)];
+            
+            r += copy[srcOff] * weight;
+            g += copy[srcOff + 1] * weight;
+            b += copy[srcOff + 2] * weight;
+          }
+        }
+
+        pixels[i] = Math.min(255, Math.max(0, r));
+        pixels[i+1] = Math.min(255, Math.max(0, g));
+        pixels[i+2] = Math.min(255, Math.max(0, b));
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+      
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const file = new File([blob], imageFile.name.replace(/\.[^/.]+$/, "") + "_sharpened.png", { type: 'image/png' });
+          processFile(file);
+        }
+        setIsSharpening(false);
+      }, 'image/png');
+    };
+  };
+
+  const handleAIExpand = async () => {
+    if (!imageFile || !imagePreviewUrl || !imageSize) return;
+    
+    const apiKey = (process as any).env.GEMINI_API_KEY;
+    if (!apiKey) {
+      setError("Gemini API Key is missing. Please set GEMINI_API_KEY in your environment variables.");
+      return;
+    }
+
+    setIsExpandingAI(true);
+    setError(null);
+
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      
+      const response = await fetch(imagePreviewUrl);
+      const blob = await response.blob();
+      const reader = new FileReader();
+      const base64Data = await new Promise<string>((resolve) => {
+        reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+        reader.readAsDataURL(blob);
+      });
+
+      // Target resolution
+      const targetWidth = imageSize.width + expandOffsets.left + expandOffsets.right;
+      const targetHeight = imageSize.height + expandOffsets.top + expandOffsets.bottom;
+
+      const prompt = `Expand this image to a total resolution of ${targetWidth}x${targetHeight}.
+The original image is centrally located.
+Extend the image by:
+- ${expandOffsets.top}px at the top
+- ${expandOffsets.bottom}px at the bottom
+- ${expandOffsets.left}px at the left
+- ${expandOffsets.right}px at the right
+
+${expandPrompt}
+Ensure the expanded areas are photorealistic, seamless, and perfectly match the existing texture, lighting, and style.`;
+
+      const genResponse = await ai.models.generateContent({
+        model: 'gemini-2.0-flash', // Stable capable model
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: blob.type,
+              },
+            },
+            {
+              text: prompt,
+            },
+          ],
+        },
+      });
+
+      let expandedImageUrl = '';
+      for (const part of genResponse.candidates?.[0]?.content?.parts || []) {
+        if (part.inlineData) {
+          expandedImageUrl = `data:image/png;base64,${part.inlineData.data}`;
+          break;
+        }
+      }
+
+      if (expandedImageUrl) {
+        const res = await fetch(expandedImageUrl);
+        const expandedBlob = await res.blob();
+        const expandedFile = new File([expandedBlob], imageFile.name.replace(/\.[^/.]+$/, "") + "_expanded.png", { type: 'image/png' });
+        
+        // Reset offsets after success
+        setExpandOffsets({top: 0, bottom: 0, left: 0, right: 0});
+        processFile(expandedFile);
+      } else {
+        throw new Error("No image was generated by the AI.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      setError(err?.message || "Failed to expand image with AI.");
+    } finally {
+      setIsExpandingAI(false);
+    }
+  };
+
+  const downloadFull = async () => {
+    if (!imageFile || !imagePreviewUrl) return;
+    setIsProcessing(true);
+    try {
+      const { img, canvas } = await getCanvasContext();
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        setIsProcessing(false);
+        return;
+      }
+      
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+      
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const originalName = imageFile.name.replace(/\.[^/.]+$/, "");
+          const fileName = `${originalName}_processed.png`;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = fileName;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+        setIsProcessing(false);
+      }, 'image/png');
+    } catch (err) {
+      console.error(err);
+      setIsProcessing(false);
+    }
   };
 
   const splitAndDownload = async () => {
@@ -304,8 +569,8 @@ export default function App() {
              const maxX = Math.min(W, Math.ceil(Math.max(tlX, blX, trX, brX)));
              
              const slicePromise = new Promise<void>((resolve, reject) => {
-                 const sliceW = Math.max(1, maxX - minX);
-                 const sliceH = Math.max(1, Math.ceil(bottomY - topY));
+                 const sliceW = Math.round(maxX - minX);
+                 const sliceH = Math.round(bottomY - topY);
                  
                  const pieceIndexKey = index - 1;
                  const t = pieceTransforms[pieceIndexKey] || { rotation: 0, flipH: false, flipV: false };
@@ -313,6 +578,9 @@ export default function App() {
                  canvas.width = sliceW;
                  canvas.height = sliceH;
                  ctx.clearRect(0, 0, sliceW, sliceH);
+
+                 ctx.imageSmoothingEnabled = true;
+                 ctx.imageSmoothingQuality = 'high';
                  
                  ctx.save();
                  ctx.translate(sliceW / 2, sliceH / 2);
@@ -322,14 +590,14 @@ export default function App() {
   
                  // Polygon crop for slanted cuts
                  ctx.beginPath();
-                 ctx.moveTo(tlX - minX, 0);
-                 ctx.lineTo(trX - minX, 0);
-                 ctx.lineTo(brX - minX, sliceH);
-                 ctx.lineTo(blX - minX, sliceH);
+                 ctx.moveTo(Math.round(tlX - minX), 0);
+                 ctx.lineTo(Math.round(trX - minX), 0);
+                 ctx.lineTo(Math.round(brX - minX), sliceH);
+                 ctx.lineTo(Math.round(blX - minX), sliceH);
                  ctx.closePath();
                  ctx.clip();
                  
-                 ctx.drawImage(img, minX, topY, sliceW, sliceH, 0, 0, sliceW, sliceH);
+                 ctx.drawImage(img, minX, Math.round(topY), sliceW, sliceH, 0, 0, sliceW, sliceH);
                  ctx.restore();
   
                  canvas.toBlob((blob) => {
@@ -354,7 +622,7 @@ export default function App() {
                    } else {
                      reject(new Error(`Failed to create blob for slice ${row},${col}`));
                    }
-                 }, imageFile.type === 'image/jpeg' ? 'image/jpeg' : 'image/png');
+                 }, imageFile.type === 'image/jpeg' ? 'image/jpeg' : 'image/png', 1.0);
              });
              
              if (!downloadAsZip) {
@@ -553,6 +821,13 @@ export default function App() {
               Background Remover
               <span className="bg-indigo-500/20 text-indigo-300 text-[10px] px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">New</span>
             </button>
+            <button 
+              onClick={() => setCurrentTool('ai-expand')} 
+              className={`px-3 py-1.5 rounded text-sm font-medium transition-all flex items-center gap-1.5 ${currentTool === 'ai-expand' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}
+            >
+              AI Expand
+              <Maximize2 className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
 
@@ -570,37 +845,73 @@ export default function App() {
             </label>
           ) : null}
 
+          {currentTool === 'ai-expand' && imagePreviewUrl && (
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setExpandOffsets({top: 0, bottom: 0, left: 0, right: 0})}
+                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium transition-colors border border-slate-600"
+              >
+                Reset Handles
+              </button>
+              <div className="w-px h-6 bg-slate-700 mx-1"></div>
+              <button
+                onClick={handleAIExpand}
+                disabled={isExpandingAI || isProcessing}
+                className="px-4 py-1.5 bg-pink-600 hover:bg-pink-500 rounded text-sm font-bold transition-all shadow-lg shadow-pink-500/20 disabled:opacity-50 flex items-center gap-2"
+              >
+                {isExpandingAI ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                Generate Expansion
+              </button>
+            </div>
+          )}
+
           {currentTool === 'splitter' && imagePreviewUrl && (
-            <>
+            <div className="flex items-center gap-2">
               <button 
                 onClick={handleReset}
-                className="px-4 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-sm font-medium transition-colors border border-slate-600"
+                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium transition-colors border border-slate-600"
+                title="Start over with a new image"
               >
-                Start Over
+                Reset
               </button>
+
+              <div className="w-px h-6 bg-slate-700 mx-1"></div>
+
+              <button
+                onClick={handleUpscale}
+                disabled={isUpscaling || isProcessing || isSharpening}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm"
+                title="Upscale image resolution by 2x"
+              >
+                {isUpscaling ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ZoomIn className="w-3.5 h-3.5" />}
+                Upscale 2x
+              </button>
+
+              <button 
+                onClick={downloadFull}
+                disabled={isProcessing || isUpscaling}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm"
+                title="Download the current full image (with transforms applied)"
+              >
+                <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
+                Save Full
+              </button>
+
               <button 
                 onClick={splitAndDownload}
-                disabled={isProcessing || totalSlices <= 1}
-                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20 disabled:opacity-50 disabled:pointer-events-none flex items-center gap-2"
+                disabled={isProcessing || isUpscaling}
+                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-bold transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50 flex items-center gap-2"
               >
                 {isProcessing ? (
-                  <><RefreshCw className="w-4 h-4 animate-spin" /> Processing...</>
+                  <><RefreshCw className="w-4 h-4 animate-spin" /> ...</>
                 ) : (
                   <>
-                    {selectedPieces.size > 0 ? `Download Selected (${selectedPieces.size})` : `Download All (${totalSlices})`}
+                    <Download className="w-4 h-4" />
+                    {selectedPieces.size > 0 ? `Save Selected (${selectedPieces.size})` : `Download Grid (${totalSlices})`}
                   </>
                 )}
               </button>
-              
-              {selectedPieces.size > 0 && (
-                <button 
-                  onClick={() => setSelectedPieces(new Set())}
-                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium transition-colors"
-                >
-                  Clear Selection
-                </button>
-              )}
-            </>
+            </div>
           )}
 
           {currentTool === 'bg-remover' && bgFiles.length > 0 && (
@@ -627,11 +938,11 @@ export default function App() {
 
       <div className="flex flex-1 overflow-hidden relative">
         
-        {/* === SPLITTER MODE UI === */}
-        {currentTool === 'splitter' && (
+        {/* === SIDEBARS === */}
+        {imagePreviewUrl && (
           <>
-            {/* Sidebar Controls */}
-            {imagePreviewUrl && (
+            {/* Splitter Sidebar */}
+            {currentTool === 'splitter' && (
               <aside className="w-80 bg-[#1e293b] border-r border-slate-700 p-6 flex flex-col gap-8 shrink-0 overflow-y-auto">
                 <div>
                   <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-4">Export Settings</label>
@@ -718,159 +1029,204 @@ export default function App() {
                     <button
                       onClick={applyTransform}
                       disabled={isApplyingTransform}
-                      className="w-full py-2 bg-slate-700 hover:bg-slate-600 rounded text-xs font-semibold uppercase tracking-wider transition-colors disabled:opacity-50 mt-2"
+                      className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-xs font-semibold uppercase tracking-wider transition-colors disabled:opacity-50"
                     >
                       {isApplyingTransform ? 'Applying...' : 'Apply Transform'}
                     </button>
-                    
-                    <div className="text-[10px] text-slate-500 mt-2">
-                       Hint: First transform modifies the whole image.
-                    </div>
                   </div>
 
                   {selectedLine && (
-                    <>
-                      <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block mb-4 flex justify-between items-center">
+                    <div className="space-y-4 mb-8">
+                      <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block flex justify-between items-center">
                         Column Line Angle
-                        <button onClick={() => setSelectedLine(null)} className="text-slate-500 hover:text-white" title="Deselect"><X className="w-4 h-4" /></button>
+                        <button onClick={() => setSelectedLine(null)} className="text-slate-500 hover:text-white"><X className="w-4 h-4" /></button>
                       </label>
-                      <div className="space-y-4 mb-8 p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-md">
-                        <div>
-                          <div className="flex justify-between mb-2">
-                            <span className="text-sm font-medium">Angle ({(() => {
-                               const row = vLinesPerRow[selectedLine.rIdx] || [];
-                               return row[selectedLine.cIdx]?.angle || 0;
-                            })()}°)</span>
-                            <div className="flex gap-2">
-                              <button onClick={() => {
-                                 setVLinesPerRow(prev => {
-                                    const next = [...prev];
-                                    const nextRow = [...(next[selectedLine.rIdx] || [])];
-                                    if(nextRow[selectedLine.cIdx]) {
-                                      nextRow[selectedLine.cIdx] = { ...nextRow[selectedLine.cIdx], angle: 0 };
-                                    }
-                                    next[selectedLine.rIdx] = nextRow;
-                                    return next;
-                                 });
-                              }} className="hover:text-red-400" title="Reset angle"><RefreshCw className="w-3.5 h-3.5" /></button>
-                            </div>
-                          </div>
-                          <input
-                            type="range"
-                            min="-75"
-                            max="75"
-                            value={(() => {
-                               const row = vLinesPerRow[selectedLine.rIdx] || [];
-                               return row[selectedLine.cIdx]?.angle || 0;
-                            })()}
-                            onChange={(e) => {
-                               const val = parseInt(e.target.value);
-                               setVLinesPerRow(prev => {
-                                  const next = [...prev];
-                                  const nextRow = [...(next[selectedLine.rIdx] || [])];
-                                  if(nextRow[selectedLine.cIdx]) {
-                                    nextRow[selectedLine.cIdx] = { ...nextRow[selectedLine.cIdx], angle: val };
-                                  }
-                                  next[selectedLine.rIdx] = nextRow;
-                                  return next;
-                               });
-                            }}
-                            className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                          />
-                        </div>
-                        <div className="text-[10px] text-slate-400">
-                          Click a blue vertical line in the preview to select it and angle the cut.
-                        </div>
+                      <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-md">
+                        <input
+                          type="range"
+                          min="-75"
+                          max="75"
+                          value={vLinesPerRow[selectedLine.rIdx][selectedLine.cIdx].angle}
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value);
+                            setVLinesPerRow(prev => {
+                              const next = [...prev];
+                              const nextRow = [...(next[selectedLine.rIdx] || [])];
+                              nextRow[selectedLine.cIdx] = { ...nextRow[selectedLine.cIdx], angle: val };
+                              next[selectedLine.rIdx] = nextRow;
+                              return next;
+                            });
+                          }}
+                          className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                        />
                       </div>
-                    </>
+                    </div>
                   )}
 
                   <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-4">Grid Configuration</label>
-                  <div className="space-y-6">
+                  <div className="space-y-4 mb-8">
                     <div>
-                      <div className="flex justify-between mb-2">
-                        <span className="text-sm font-medium">Columns (Decimal Ok)</span>
-                      </div>
+                      <span className="text-sm font-medium mb-1 block">Columns</span>
                       <input
-                        id="columns"
                         type="number"
-                        step="0.01"
-                        min="0.1"
-                        max="50"
+                        step="0.1"
                         value={columnsStr}
                         onChange={(e) => {
                           setColumnsStr(e.target.value);
                           updateGridLines(e.target.value, rowsStr);
                         }}
-                        className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                        className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
                       />
                     </div>
                     <div>
-                      <div className="flex justify-between mb-2">
-                        <span className="text-sm font-medium">Rows (Decimal Ok)</span>
-                      </div>
+                      <span className="text-sm font-medium mb-1 block">Rows</span>
                       <input
-                        id="rows"
                         type="number"
-                        step="0.01"
-                        min="0.1"
-                        max="50"
+                        step="0.1"
                         value={rowsStr}
                         onChange={(e) => {
                           setRowsStr(e.target.value);
                           updateGridLines(columnsStr, e.target.value);
                         }}
-                        className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                        className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
                       />
                     </div>
                   </div>
-                </div>
 
-                <div>
                   <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-4">Preview Mode</label>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-2 mb-8">
                     <button 
                       onClick={() => setPreviewMode('grid')}
                       className={`p-3 rounded border text-xs font-semibold transition-colors ${previewMode === 'grid' ? 'border-indigo-500 bg-indigo-500/10 text-white' : 'border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
                     >
-                      Grid Lines
+                      Grid
                     </button>
                     <button 
                       onClick={() => setPreviewMode('exploded')}
                       className={`p-3 rounded border text-xs font-semibold transition-colors ${previewMode === 'exploded' ? 'border-indigo-500 bg-indigo-500/10 text-white' : 'border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-400'}`}
                     >
-                      Split Pieces
+                      Pieces
                     </button>
                   </div>
                 </div>
 
-                <div className="mt-auto">
+                <div className="mt-auto pt-4 border-t border-slate-700/50">
                   <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
                     <h4 className="text-xs font-bold uppercase text-slate-500 mb-2 italic">File Info</h4>
                     {imageSize && (
                       <div className="flex justify-between text-xs py-1">
-                        <span className="text-slate-400">Dimensions:</span>
-                        <span>{imageSize.width} x {imageSize.height} px</span>
-                      </div>
-                    )}
-                    {imageFile && (
-                      <div className="flex justify-between text-xs py-1">
-                        <span className="text-slate-400">Format:</span>
-                        <span className="uppercase">{imageFile.type.split('/')[1] || 'Unknown'}</span>
+                        <span className="text-slate-400">Image:</span>
+                        <span>{imageSize.width}x{imageSize.height}</span>
                       </div>
                     )}
                     <div className="flex justify-between text-xs py-1">
-                      <span className="text-slate-400">Slices:</span>
-                      <span>{totalSlices}</span>
+                      <span className="text-slate-400">Total:</span>
+                      <span>{totalSlices} slices</span>
                     </div>
                   </div>
                 </div>
               </aside>
             )}
 
-            {/* Main Workspace */}
-            <main className="flex-1 bg-[#0f172a] relative overflow-auto">
-              {!imagePreviewUrl ? (
+            {/* AI Expand Sidebar */}
+            {currentTool === 'ai-expand' && (
+              <aside className="w-80 bg-[#1e293b] border-r border-slate-700 p-6 flex flex-col gap-8 shrink-0 overflow-y-auto">
+                <div className="animate-in fade-in slide-in-from-right-4 duration-500">
+                  <label className="text-xs font-bold uppercase tracking-wider text-pink-400 block mb-4 flex items-center gap-2 font-mono">
+                    <Maximize2 className="w-4 h-4" />
+                    Expansion Mode
+                  </label>
+                  
+                  <div className="space-y-6">
+                    <div className="bg-pink-500/5 border border-pink-500/10 p-4 rounded-xl shadow-inner space-y-4">
+                      <div className="flex gap-3">
+                        <div className="flex-1">
+                           <span className="text-xs font-bold text-slate-500 mb-2 block uppercase">Target Width</span>
+                           <div className="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white font-mono flex items-center justify-between">
+                             {expandWidth}
+                             <span className="text-[10px] text-slate-500">px</span>
+                           </div>
+                        </div>
+                        <div className="flex-1">
+                           <span className="text-xs font-bold text-slate-500 mb-2 block uppercase">Target Height</span>
+                           <div className="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white font-mono flex items-center justify-between">
+                             {expandHeight}
+                             <span className="text-[10px] text-slate-500">px</span>
+                           </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-300 font-mono">
+                        <div className="p-2 border border-slate-700 bg-slate-800 rounded flex justify-between">
+                          <span>LEFT</span>
+                          <span className={expandOffsets.left > 0 ? "text-pink-400" : ""}>+{expandOffsets.left}</span>
+                        </div>
+                        <div className="p-2 border border-slate-700 bg-slate-800 rounded flex justify-between">
+                          <span>RIGHT</span>
+                          <span className={expandOffsets.right > 0 ? "text-pink-400" : ""}>+{expandOffsets.right}</span>
+                        </div>
+                        <div className="p-2 border border-slate-700 bg-slate-800 rounded flex justify-between">
+                          <span>TOP</span>
+                          <span className={expandOffsets.top > 0 ? "text-pink-400" : ""}>+{expandOffsets.top}</span>
+                        </div>
+                        <div className="p-2 border border-slate-700 bg-slate-800 rounded flex justify-between">
+                          <span>BOTTOM</span>
+                          <span className={expandOffsets.bottom > 0 ? "text-pink-400" : ""}>+{expandOffsets.bottom}</span>
+                        </div>
+                      </div>
+                      
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                           <span className="text-xs font-bold text-slate-500 uppercase">AI Prompt</span>
+                           <Sparkles className="w-3 h-3 text-pink-500" />
+                        </div>
+                        <textarea
+                          value={expandPrompt}
+                          onChange={(e) => setExpandPrompt(e.target.value)}
+                          placeholder="What should the AI fill the extra space with?"
+                          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-pink-500 transition-colors h-28 resize-none shadow-inner"
+                        />
+                      </div>
+
+                      <button
+                        onClick={handleAIExpand}
+                        disabled={isExpandingAI || isProcessing}
+                        className="w-full py-4 bg-gradient-to-br from-pink-600 to-indigo-600 hover:from-pink-500 hover:to-indigo-500 rounded-xl text-xs font-black uppercase tracking-[0.2em] transition-all disabled:opacity-50 flex items-center justify-center gap-3 shadow-xl shadow-pink-500/10 border border-white/10"
+                      >
+                        {isExpandingAI ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Wand2 className="w-5 h-5" />}
+                        {isExpandingAI ? 'Generating...' : 'Magic Expand'}
+                      </button>
+
+                      <button
+                        onClick={() => setExpandOffsets({top: 0, bottom: 0, left: 0, right: 0})}
+                        className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-500 hover:text-slate-300 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all border border-slate-700/50"
+                      >
+                        Reset Extension
+                      </button>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-slate-800/30 border border-slate-700/50">
+                      <p className="text-[11px] text-slate-500 leading-relaxed text-center italic">
+                        Drag the <span className="text-pink-400 font-bold not-italic">glowing handles</span> on the image preview to visually define the region.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </aside>
+            )}
+          </>
+        )}
+
+        {/* === MAIN WORKSPACE === */}
+        {currentTool !== 'bg-remover' ? (
+          <main 
+            className={`flex-1 bg-[#0f172a] relative overflow-auto transition-colors duration-300 ${dragActive ? 'bg-indigo-500/10' : ''}`}
+            onDragEnter={handleDrag}
+            onDragLeave={handleDrag}
+            onDragOver={handleDrag}
+            onDrop={handleDrop}
+          >
+            {!imagePreviewUrl ? (
                 <div className="w-full h-full flex items-center justify-center p-8 md:p-12">
                   <motion.div 
                     initial={{ opacity: 0, y: 10 }}
@@ -918,303 +1274,423 @@ export default function App() {
                   }}
                 >
                   {/* Image Canvas Area */}
-                  {previewMode === 'grid' ? (
-                    <div 
-                      className="relative shadow-2xl rounded shadow-black/50 group flex overflow-hidden bg-slate-900 checkerboard-bg" 
-                      ref={imageElementRef}
-                      style={{
-                         transform: `scale(${zoomLevel})`,
-                         transformOrigin: 'center center',
-                         transition: 'transform 0.2s ease-out'
-                      }}
-                    >
-                      <img
-                        src={imagePreviewUrl}
-                        alt="Preview"
-                        onLoad={handleImageLoad}
-                        className="block max-w-[calc(100vw-28rem)] max-h-[calc(100vh-12rem)] object-contain transition-opacity duration-300 rounded pointer-events-none"
-                      />
-
-                      {/* Interactive Drag Lines overlay */}
-                      {imageSize && (
-                        <div className="absolute top-0 left-0 right-0 bottom-0">
-                          {(() => {
-                             const hP = [0, ...[...hLines].sort((a,b)=>a-b), 1];
-                             return hP.slice(0, -1).map((startH, rIdx) => {
-                               const endH = hP[rIdx + 1];
-                               const rowVLines = vLinesPerRow[rIdx] || [];
-                               
-                               return (
-                                 <div 
-                                   key={`row-lines-${rIdx}`} 
-                                   className="absolute left-0 right-0 overflow-hidden pointer-events-none" 
-                                   style={{ top: `${startH * 100}%`, height: `${(endH - startH) * 100}%` }}
-                                 >
-                                   {rowVLines.map((v, cIdx) => {
-                                     const isSelected = selectedLine?.rIdx === rIdx && selectedLine?.cIdx === cIdx;
-                                     return (
-                                     <div
-                                       key={`v-${rIdx}-${cIdx}`}
-                                       className={`absolute w-8 -ml-4 cursor-col-resize flex justify-center group/line pointer-events-auto ${isSelected ? 'z-20' : 'z-10'}`}
-                                       style={{ 
-                                          left: `${v.pos * 100}%`,
-                                          top: `-50%`,
-                                          height: `200%`,
-                                          transform: `rotate(${v.angle}deg)`,
-                                          transformOrigin: 'center center'
-                                       }}
-                                   onClick={(e) => {
-                                      e.stopPropagation();
-                                      setSelectedLine({ rIdx, cIdx });
-                                   }}
-                                   onMouseDown={(e) => {
-                                     e.preventDefault();
-                                     const startX = e.clientX;
-                                     const startVal = rowVLines[cIdx].pos;
-                                     const rect = imageElementRef.current!.getBoundingClientRect();
-                                     const handleMouseMove = (me: MouseEvent) => {
-                                       const delta = me.clientX - startX;
-                                       const newVal = Math.max(0, Math.min(1, startVal + delta / rect.width));
-                                       setVLinesPerRow(prev => {
-                                           const next = [...prev];
-                                           const nextRow = [...(next[rIdx] || [])];
-                                           nextRow[cIdx] = { ...nextRow[cIdx], pos: newVal };
-                                           next[rIdx] = nextRow;
-                                           return next;
-                                       });
-                                     };
-                                     const handleMouseUp = () => {
-                                       window.removeEventListener('mousemove', handleMouseMove);
-                                       window.removeEventListener('mouseup', handleMouseUp);
-                                     };
-                                     window.addEventListener('mousemove', handleMouseMove);
-                                     window.addEventListener('mouseup', handleMouseUp);
-                                   }}
-                                 >
-                                    <div className={`w-[1.5px] h-full ${isSelected ? 'bg-indigo-400 shadow-[0_0_8px_theme(colors.indigo.500)] w-[3px]' : 'bg-blue-500/80 shadow-[0_0_3px_rgba(0,0,0,0.5)] group-hover/line:bg-blue-400 group-hover/line:w-[3px]'} transition-all pointer-events-none`}></div>
-                                 </div>
-                               )})
-                                 }
-                                 </div>
-                               );
-                             });
-                          })()}
+                  {currentTool === 'ai-expand' && (
+                     <div className="relative flex items-center justify-center">
+                        <div 
+                          className="relative shadow-2xl rounded shadow-black/50 group flex overflow-hidden bg-slate-900 checkerboard-bg" 
+                          style={{ 
+                             transform: `scale(${zoomLevel})`,
+                             transformOrigin: 'center center',
+                             transition: 'transform 0.2s ease-out'
+                          }}
+                        >
+                          <img
+                            src={imagePreviewUrl}
+                            alt="AI Expand Preview"
+                            onLoad={handleImageLoad}
+                            className="block max-w-[calc(100vw-28rem)] max-h-[calc(100vh-12rem)] object-contain transition-opacity duration-300 rounded pointer-events-none"
+                            style={{
+                              paddingTop: expandOffsets.top * zoomLevel,
+                              paddingBottom: expandOffsets.bottom * zoomLevel,
+                              paddingLeft: expandOffsets.left * zoomLevel,
+                              paddingRight: expandOffsets.right * zoomLevel,
+                              boxSizing: 'content-box'
+                            }}
+                          />
                           
-                          {hLines.map((h, i) => (
-                            <div
-                              key={`h-${i}`}
-                              className="absolute left-0 right-0 h-4 -mt-2 cursor-row-resize flex flex-col justify-center group/line z-10"
-                              style={{ top: `${h * 100}%` }}
-                              onMouseDown={(e) => {
-                                e.preventDefault();
-                                const startY = e.clientY;
-                                const startVal = hLines[i];
-                                const rect = imageElementRef.current!.getBoundingClientRect();
-                                const handleMouseMove = (me: MouseEvent) => {
-                                  const delta = me.clientY - startY;
-                                  const newVal = Math.max(0, Math.min(1, startVal + delta / rect.height));
-                                  setHLines(prev => {
-                                      const next = [...prev];
-                                      next[i] = newVal;
-                                      return next;
-                                  });
-                                };
-                                const handleMouseUp = () => {
-                                  window.removeEventListener('mousemove', handleMouseMove);
-                                  window.removeEventListener('mouseup', handleMouseUp);
-                                };
-                                window.addEventListener('mousemove', handleMouseMove);
-                                window.addEventListener('mouseup', handleMouseUp);
-                              }}
-                            >
-                              <div className="h-[1.5px] w-full bg-green-500/80 group-hover/line:bg-green-400 group-hover/line:h-[3px] transition-all shadow-[0_0_3px_rgba(0,0,0,0.5)]"></div>
+                          {/* DRAGGABLE HANDLES */}
+                          {imageSize && !isExpandingAI && (
+                            <div className="absolute inset-0 pointer-events-none">
+                              {/* Top Handle */}
+                              <div 
+                                className="absolute left-1/2 -top-2 w-12 h-6 -translate-x-1/2 cursor-ns-resize pointer-events-auto flex flex-col items-center group/h z-20"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  const startY = e.clientY;
+                                  const startVal = expandOffsets.top;
+                                  const onMove = (moveEvt: MouseEvent) => {
+                                    const delta = startY - moveEvt.clientY;
+                                    setExpandOffsets(prev => ({ ...prev, top: Math.max(0, startVal + delta / zoomLevel) }));
+                                  };
+                                  const onUp = () => {
+                                    window.removeEventListener('mousemove', onMove);
+                                    window.removeEventListener('mouseup', onUp);
+                                  };
+                                  window.addEventListener('mousemove', onMove);
+                                  window.addEventListener('mouseup', onUp);
+                                }}
+                              >
+                                 <div className="w-8 h-1.5 bg-pink-500 rounded-full shadow-[0_0_10px_rgba(236,72,153,0.8)] group-hover/h:h-2 transition-all"></div>
+                              </div>
+                              
+                              {/* Bottom Handle */}
+                              <div 
+                                className="absolute left-1/2 -bottom-2 w-12 h-6 -translate-x-1/2 cursor-ns-resize pointer-events-auto flex flex-col items-center justify-end group/h z-20"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  const startY = e.clientY;
+                                  const startVal = expandOffsets.bottom;
+                                  const onMove = (moveEvt: MouseEvent) => {
+                                    const delta = moveEvt.clientY - startY;
+                                    setExpandOffsets(prev => ({ ...prev, bottom: Math.max(0, startVal + delta / zoomLevel) }));
+                                  };
+                                  const onUp = () => {
+                                    window.removeEventListener('mousemove', onMove);
+                                    window.removeEventListener('mouseup', onUp);
+                                  };
+                                  window.addEventListener('mousemove', onMove);
+                                  window.addEventListener('mouseup', onUp);
+                                }}
+                              >
+                                 <div className="w-8 h-1.5 bg-pink-500 rounded-full shadow-[0_0_10px_rgba(236,72,153,0.8)] group-hover/h:h-2 transition-all"></div>
+                              </div>
+                              
+                              {/* Left Handle */}
+                              <div 
+                                className="absolute top-1/2 -left-2 w-6 h-12 -translate-y-1/2 cursor-ew-resize pointer-events-auto flex items-center group/h z-20"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  const startX = e.clientX;
+                                  const startVal = expandOffsets.left;
+                                  const onMove = (moveEvt: MouseEvent) => {
+                                    const delta = startX - moveEvt.clientX;
+                                    setExpandOffsets(prev => ({ ...prev, left: Math.max(0, startVal + delta / zoomLevel) }));
+                                  };
+                                  const onUp = () => {
+                                    window.removeEventListener('mousemove', onMove);
+                                    window.removeEventListener('mouseup', onUp);
+                                  };
+                                  window.addEventListener('mousemove', onMove);
+                                  window.addEventListener('mouseup', onUp);
+                                }}
+                              >
+                                 <div className="w-1.5 h-8 bg-pink-500 rounded-full shadow-[0_0_10px_rgba(236,72,153,0.8)] group-hover/h:w-2 transition-all"></div>
+                              </div>
+                              
+                              {/* Right Handle */}
+                              <div 
+                                className="absolute top-1/2 -right-2 w-6 h-12 -translate-y-1/2 cursor-ew-resize pointer-events-auto flex items-center justify-end group/h z-20"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  const startX = e.clientX;
+                                  const startVal = expandOffsets.right;
+                                  const onMove = (moveEvt: MouseEvent) => {
+                                    const delta = moveEvt.clientX - startX;
+                                    setExpandOffsets(prev => ({ ...prev, right: Math.max(0, startVal + delta / zoomLevel) }));
+                                  };
+                                  const onUp = () => {
+                                    window.removeEventListener('mousemove', onMove);
+                                    window.removeEventListener('mouseup', onUp);
+                                  };
+                                  window.addEventListener('mousemove', onMove);
+                                  window.addEventListener('mouseup', onUp);
+                                }}
+                              >
+                                 <div className="w-1.5 h-8 bg-pink-500 rounded-full shadow-[0_0_10px_rgba(236,72,153,0.8)] group-hover/h:w-2 transition-all"></div>
+                              </div>
                             </div>
-                          ))}
+                          )}
                         </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div 
-                      className="flex justify-center items-center h-[calc(100vh-12rem)] max-w-full w-full p-4"
-                    >
-                      <div 
-                        className="relative w-full h-full"
-                        style={{
-                           aspectRatio: imageSize ? `${imageSize.width} / ${imageSize.height}` : 'auto',
-                           maxHeight: '100%',
-                           maxWidth: '100%',
-                        }}
-                      >
-                         {(() => {
-                            if (!imageSize) return null;
-                            const hP = [0, ...[...hLines].sort((a,b)=>a-b), 1];
-                            let sliceIndex = 0;
-                            const W = imageSize.width;
-                            const H = imageSize.height;
-
-                            return hP.slice(0, -1).map((startH, rIdx) => {
-                                const endH = hP[rIdx + 1];
-                                const topY = startH * H;
-                                const bottomY = endH * H;
-                                const centerY = (topY + bottomY) / 2;
-                                
-                                const rowVLines = vLinesPerRow[rIdx] || [];
-                                const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
-                                
-                                const getXAtY = (lineInfo: {pos: number, angle: number} | 'left' | 'right', y: number) => {
-                                    if (lineInfo === 'left') return 0;
-                                    if (lineInfo === 'right') return W;
-                                    const cx = lineInfo.pos * W;
-                                    const rad = lineInfo.angle * Math.PI / 180;
-                                    return cx - (y - centerY) * Math.tan(rad);
-                                };
-
-                                return sortedLines.concat('right' as any).map((rightLine, cIdx) => {
-                                    const leftLine = cIdx === 0 ? 'left' : sortedLines[cIdx - 1];
-                                    
-                                    const tlX = Math.max(0, Math.min(W, getXAtY(leftLine as any, topY)));
-                                    const blX = Math.max(0, Math.min(W, getXAtY(leftLine as any, bottomY)));
-                                    const trX = Math.max(0, Math.min(W, getXAtY(rightLine as any, topY)));
-                                    const brX = Math.max(0, Math.min(W, getXAtY(rightLine as any, bottomY)));
-                                    
-                                    const minX = Math.floor(Math.min(tlX, blX, trX, brX));
-                                    const maxX = Math.ceil(Math.max(tlX, blX, trX, brX));
-                                    
-                                    const sliceW = Math.max(1, maxX - minX);
-                                    const sliceH = Math.max(1, bottomY - topY);
-                                    
-                                    const currIndex = sliceIndex++;
-                                    const transformData = pieceTransforms[currIndex] || { rotation: 0, flipH: false, flipV: false };
-                                    const isSelected = selectedPieces.has(currIndex);
-                                    
-                                    const explodeX = (cIdx - sortedLines.length / 2) * 12;
-                                    const explodeY = (rIdx - (hP.length - 1) / 2) * 12;
-
-                                    const pTL = { x: ((tlX - minX) / sliceW) * 100, y: 0 };
-                                    const pTR = { x: ((trX - minX) / sliceW) * 100, y: 0 };
-                                    const pBR = { x: ((brX - minX) / sliceW) * 100, y: 100 };
-                                    const pBL = { x: ((blX - minX) / sliceW) * 100, y: 100 };
-                                    
-                                    const bgPosX = Math.abs(W - sliceW) < 0.1 ? 0 : (minX / (W - sliceW)) * 100;
-                                    const bgPosY = Math.abs(H - sliceH) < 0.1 ? 0 : (topY / (H - sliceH)) * 100;
-
-                                    const updatePieceTransform = (e: React.MouseEvent, updates: Partial<PieceTransform>) => {
-                                      e.stopPropagation();
-                                      setPieceTransforms(prev => ({
-                                        ...prev,
-                                        [currIndex]: {
-                                          ...(prev[currIndex] || { rotation: 0, flipH: false, flipV: false }),
-                                          ...updates
-                                        }
-                                      }));
-                                    };
-
-                                    const toggleSelection = () => {
-                                      setSelectedPieces(prev => {
-                                        const next = new Set(prev);
-                                        if (next.has(currIndex)) next.delete(currIndex);
-                                        else next.add(currIndex);
-                                        return next;
+                     </div>
+                  )}
+                  {currentTool === 'splitter' && previewMode === 'grid' && (
+                      <div className="relative flex items-center justify-center">
+                         <div 
+                           className="relative shadow-2xl rounded shadow-black/50 group flex overflow-hidden bg-slate-900 checkerboard-bg" 
+                           style={{ 
+                              transform: `scale(${zoomLevel})`,
+                              transformOrigin: 'center center',
+                              transition: 'transform 0.2s ease-out'
+                           }}
+                         >
+                          <img
+                            ref={imageElementRef}
+                            src={imagePreviewUrl}
+                            alt="Preview"
+                            onLoad={handleImageLoad}
+                            className="block max-w-[calc(100vw-28rem)] max-h-[calc(100vh-12rem)] object-contain transition-opacity duration-300 rounded pointer-events-none"
+                          />
+    
+                          {/* Interactive Drag Lines overlay */}
+                          {imageSize && (
+                            <div className="absolute top-0 left-0 right-0 bottom-0">
+                              {(() => {
+                                 const hP = [0, ...[...hLines].sort((a,b)=>a-b), 1];
+                                 return hP.slice(0, -1).map((startH, rIdx) => {
+                                   const endH = hP[rIdx + 1];
+                                   const rowVLines = vLinesPerRow[rIdx] || [];
+                                   
+                                   return (
+                                     <div 
+                                       key={`row-lines-${rIdx}`} 
+                                       className="absolute left-0 right-0 overflow-hidden pointer-events-none" 
+                                       style={{ top: `${startH * 100}%`, height: `${(endH - startH) * 100}%` }}
+                                     >
+                                       {rowVLines.map((v, cIdx) => {
+                                         const isSelected = selectedLine?.rIdx === rIdx && selectedLine?.cIdx === cIdx;
+                                         return (
+                                         <div
+                                           key={`v-${rIdx}-${cIdx}`}
+                                           className={`absolute w-8 -ml-4 cursor-col-resize flex justify-center group/line pointer-events-auto ${isSelected ? 'z-20' : 'z-10'}`}
+                                           style={{ 
+                                              left: `${v.pos * 100}%`,
+                                              top: `-50%`,
+                                              height: `200%`,
+                                              transform: `rotate(${v.angle}deg)`,
+                                              transformOrigin: 'center center'
+                                           }}
+                                       onClick={(e) => {
+                                          e.stopPropagation();
+                                          setSelectedLine({ rIdx, cIdx });
+                                       }}
+                                       onMouseDown={(e) => {
+                                         e.preventDefault();
+                                         const startX = e.clientX;
+                                         const startVal = rowVLines[cIdx].pos;
+                                         const rect = imageElementRef.current?.getBoundingClientRect();
+                                          if (!rect) return;
+                                         const handleMouseMove = (me: MouseEvent) => {
+                                           const delta = me.clientX - startX;
+                                           const newVal = Math.max(0, Math.min(1, startVal + delta / rect.width));
+                                           setVLinesPerRow(prev => {
+                                               const next = [...prev];
+                                               const nextRow = [...(next[rIdx] || [])];
+                                               nextRow[cIdx] = { ...nextRow[cIdx], pos: newVal };
+                                               next[rIdx] = nextRow;
+                                               return next;
+                                           });
+                                         };
+                                         const handleMouseUp = () => {
+                                           window.removeEventListener('mousemove', handleMouseMove);
+                                           window.removeEventListener('mouseup', handleMouseUp);
+                                         };
+                                         window.addEventListener('mousemove', handleMouseMove);
+                                         window.addEventListener('mouseup', handleMouseUp);
+                                       }}
+                                     >
+                                        <div className={`w-[1.5px] h-full ${isSelected ? 'bg-indigo-400 shadow-[0_0_8px_theme(colors.indigo.500)] w-[3px]' : 'bg-blue-500/80 shadow-[0_0_3px_rgba(0,0,0,0.5)] group-hover/line:bg-blue-400 group-hover/line:w-[3px]'} transition-all pointer-events-none`}></div>
+                                     </div>
+                                   )})
+                                     }
+                                     </div>
+                                   );
+                                 });
+                              })()}
+                              
+                              {hLines.map((h, i) => (
+                                <div
+                                  key={`h-${i}`}
+                                  className="absolute left-0 right-0 h-4 -mt-2 cursor-row-resize flex flex-col justify-center group/line z-10"
+                                  style={{ top: `${h * 100}%` }}
+                                  onMouseDown={(e) => {
+                                    e.preventDefault();
+                                    const startY = e.clientY;
+                                    const startVal = hLines[i];
+                                    const rect = imageElementRef.current?.getBoundingClientRect();
+                                    if (!rect) return;
+                                    const handleMouseMove = (me: MouseEvent) => {
+                                      const delta = me.clientY - startY;
+                                      const newVal = Math.max(0, Math.min(1, startVal + delta / rect.height));
+                                      setHLines(prev => {
+                                          const next = [...prev];
+                                          next[i] = newVal;
+                                          return next;
                                       });
                                     };
-
-                                    return (
-                                      <div 
-                                        key={`${rIdx}-${cIdx}`} 
-                                        onClick={toggleSelection}
-                                        className={`absolute overflow-hidden rounded-sm bg-[#0f172a] checkerboard-bg group/piece shadow-md border cursor-pointer transition-all ${isSelected ? 'ring-2 ring-indigo-500 border-indigo-500 scale-[1.05] z-10' : 'hover:border-indigo-500/50 hover:shadow-indigo-500/20'}`}
-                                        style={{
-                                          left: `${(minX / W) * 100}%`,
-                                          top: `${(topY / H) * 100}%`,
-                                          width: `${(sliceW / W) * 100}%`,
-                                          height: `${(sliceH / H) * 100}%`,
-                                          transform: `translate(${explodeX}px, ${explodeY}px)`,
-                                        }}
-                                      >
-                                        <div 
-                                          className="w-full h-full transition-transform duration-300"
-                                          style={{
-                                            clipPath: `polygon(${pTL.x}% ${pTL.y}%, ${pTR.x}% ${pTR.y}%, ${pBR.x}% ${pBR.y}%, ${pBL.x}% ${pBL.y}%)`,
-                                            backgroundImage: `url(${imagePreviewUrl})`,
-                                            backgroundSize: `${ (W / sliceW) * 100 }% ${ (H / sliceH) * 100 }%`,
-                                            backgroundPosition: `${bgPosX}% ${bgPosY}%`,
-                                            transform: `rotate(${transformData.rotation}deg) scale(${transformData.flipH ? -1 : 1}, ${transformData.flipV ? -1 : 1})`,
-                                          }}
-                                        />
-                                        
-                                        {/* Selection indicator */}
-                                        {isSelected && (
-                                          <div className="absolute top-1 right-1 bg-indigo-500 text-white rounded-full p-0.5 z-20 shadow-lg">
-                                            <CheckCircle2 className="w-3 h-3" />
-                                          </div>
-                                        )}
-
-                                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/piece:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
-                                          <div className="flex gap-2">
-                                            <button 
-                                              onClick={(e) => updatePieceTransform(e, { rotation: (transformData.rotation - 90) % 360 })}
-                                              className="p-1.5 bg-slate-800/80 hover:bg-slate-700 rounded text-white"
-                                              title="Rotate Left"
-                                            >
-                                              <RotateCcw className="w-4 h-4" />
-                                            </button>
-                                            <button 
-                                              onClick={(e) => updatePieceTransform(e, { rotation: (transformData.rotation + 90) % 360 })}
-                                              className="p-1.5 bg-slate-800/80 hover:bg-slate-700 rounded text-white"
-                                              title="Rotate Right"
-                                            >
-                                              <RotateCw className="w-4 h-4" />
-                                            </button>
-                                          </div>
-                                          <div className="flex gap-2">
-                                            <button 
-                                              onClick={(e) => updatePieceTransform(e, { flipH: !transformData.flipH })}
-                                              className={`p-1.5 rounded text-white ${transformData.flipH ? 'bg-indigo-600' : 'bg-slate-800/80 hover:bg-slate-700'}`}
-                                              title="Flip Horizontal"
-                                            >
-                                              <FlipHorizontal className="w-4 h-4" />
-                                            </button>
-                                            <button 
-                                              onClick={(e) => updatePieceTransform(e, { flipV: !transformData.flipV })}
-                                              className={`p-1.5 rounded text-white ${transformData.flipV ? 'bg-indigo-600' : 'bg-slate-800/80 hover:bg-slate-700'}`}
-                                              title="Flip Vertical"
-                                            >
-                                              <FlipVertical className="w-4 h-4" />
-                                            </button>
-                                          </div>
-                                        </div>
-
-                                        <span className="absolute top-1 left-1 text-[10px] bg-black/70 px-1.5 py-0.5 rounded text-white shadow-sm pointer-events-none backdrop-blur-sm z-10">
-                                          {currIndex + 1}
-                                        </span>
-                                      </div>
-                                    );
-                                });
-                            });
-                         })()}
+                                    const handleMouseUp = () => {
+                                      window.removeEventListener('mousemove', handleMouseMove);
+                                      window.removeEventListener('mouseup', handleMouseUp);
+                                    };
+                                    window.addEventListener('mousemove', handleMouseMove);
+                                    window.addEventListener('mouseup', handleMouseUp);
+                                  }}
+                                >
+                                  <div className="h-[1.5px] w-full bg-green-500/80 group-hover/line:bg-green-400 group-hover/line:h-[3px] transition-all shadow-[0_0_3px_rgba(0,0,0,0.5)]"></div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </div>
+                    )}
+                      {currentTool === 'splitter' && previewMode === 'exploded' && (
+                        <div 
+                          className="flex justify-center items-center h-[calc(100vh-12rem)] max-w-full w-full p-4"
+                        >
+                          <div 
+                            className="relative w-full h-full"
+                            style={{
+                               aspectRatio: imageSize ? `${imageSize.width} / ${imageSize.height}` : 'auto',
+                               maxHeight: '100%',
+                               maxWidth: '100%',
+                            }}
+                          >
+                             {(() => {
+                                if (!imageSize) return null;
+                                const hP = [0, ...[...hLines].sort((a,b)=>a-b), 1];
+                                let sliceIndex = 0;
+                                const W = imageSize.width;
+                                const H = imageSize.height;
+    
+                                return hP.slice(0, -1).map((startH, rIdx) => {
+                                    const endH = hP[rIdx + 1];
+                                    const topY = startH * H;
+                                    const bottomY = endH * H;
+                                    const centerY = (topY + bottomY) / 2;
+                                    
+                                    const rowVLines = vLinesPerRow[rIdx] || [];
+                                    const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
+                                    
+                                    const getXAtY = (lineInfo: {pos: number, angle: number} | 'left' | 'right', y: number) => {
+                                        if (lineInfo === 'left') return 0;
+                                        if (lineInfo === 'right') return W;
+                                        const cx = lineInfo.pos * W;
+                                        const rad = lineInfo.angle * Math.PI / 180;
+                                        return cx - (y - centerY) * Math.tan(rad);
+                                    };
+    
+                                    return sortedLines.concat('right' as any).map((rightLine, cIdx) => {
+                                        const leftLine = cIdx === 0 ? 'left' : sortedLines[cIdx - 1];
+                                        
+                                        const tlX = Math.max(0, Math.min(W, getXAtY(leftLine as any, topY)));
+                                        const blX = Math.max(0, Math.min(W, getXAtY(leftLine as any, bottomY)));
+                                        const trX = Math.max(0, Math.min(W, getXAtY(rightLine as any, topY)));
+                                        const brX = Math.max(0, Math.min(W, getXAtY(rightLine as any, bottomY)));
+                                        
+                                        const minX = Math.floor(Math.min(tlX, blX, trX, brX));
+                                        const maxX = Math.ceil(Math.max(tlX, blX, trX, brX));
+                                        
+                                        const sliceW = Math.max(1, maxX - minX);
+                                        const sliceH = Math.max(1, bottomY - topY);
+                                        
+                                        const currIndex = sliceIndex++;
+                                        const transformData = pieceTransforms[currIndex] || { rotation: 0, flipH: false, flipV: false };
+                                        const isSelected = selectedPieces.has(currIndex);
+                                        
+                                        const explodeX = (cIdx - sortedLines.length / 2) * 12;
+                                        const explodeY = (rIdx - (hP.length - 1) / 2) * 12;
+    
+                                        const pTL = { x: ((tlX - minX) / sliceW) * 100, y: 0 };
+                                        const pTR = { x: ((trX - minX) / sliceW) * 100, y: 0 };
+                                        const pBR = { x: ((brX - minX) / sliceW) * 100, y: 100 };
+                                        const pBL = { x: ((blX - minX) / sliceW) * 100, y: 100 };
+                                        
+                                        const bgPosX = Math.abs(W - sliceW) < 0.1 ? 0 : (minX / (W - sliceW)) * 100;
+                                        const bgPosY = Math.abs(H - sliceH) < 0.1 ? 0 : (topY / (H - sliceH)) * 100;
+    
+                                        const updatePieceTransform = (e: React.MouseEvent, updates: Partial<PieceTransform>) => {
+                                          e.stopPropagation();
+                                          setPieceTransforms(prev => ({
+                                            ...prev,
+                                            [currIndex]: {
+                                              ...(prev[currIndex] || { rotation: 0, flipH: false, flipV: false }),
+                                              ...updates
+                                            }
+                                          }));
+                                        };
+    
+                                        const toggleSelection = () => {
+                                          setSelectedPieces(prev => {
+                                            const next = new Set(prev);
+                                            if (next.has(currIndex)) next.delete(currIndex);
+                                            else next.add(currIndex);
+                                            return next;
+                                          });
+                                        };
+    
+                                        return (
+                                          <div 
+                                            key={`${rIdx}-${cIdx}`} 
+                                            onClick={toggleSelection}
+                                            className={`absolute overflow-hidden rounded-sm bg-[#0f172a] checkerboard-bg group/piece shadow-md border cursor-pointer transition-all ${isSelected ? 'ring-2 ring-indigo-500 border-indigo-500 scale-[1.05] z-10' : 'hover:border-indigo-500/50 hover:shadow-indigo-500/20'}`}
+                                            style={{
+                                              left: `${(minX / W) * 100}%`,
+                                              top: `${(topY / H) * 100}%`,
+                                              width: `${(sliceW / W) * 100}%`,
+                                              height: `${(sliceH / H) * 100}%`,
+                                              transform: `translate(${explodeX}px, ${explodeY}px)`,
+                                            }}
+                                          >
+                                            <div 
+                                              className="w-full h-full transition-transform duration-300"
+                                              style={{
+                                                clipPath: `polygon(${pTL.x}% ${pTL.y}%, ${pTR.x}% ${pTR.y}%, ${pBR.x}% ${pBR.y}%, ${pBL.x}% ${pBL.y}%)`,
+                                                backgroundImage: `url(${imagePreviewUrl})`,
+                                                backgroundSize: `${ (W / sliceW) * 100 }% ${ (H / sliceH) * 100 }%`,
+                                                backgroundPosition: `${bgPosX}% ${bgPosY}%`,
+                                                transform: `rotate(${transformData.rotation}deg) scale(${transformData.flipH ? -1 : 1}, ${transformData.flipV ? -1 : 1})`,
+                                              }}
+                                            />
+                                            
+                                            {/* Selection indicator */}
+                                            {isSelected && (
+                                              <div className="absolute top-1 right-1 bg-indigo-500 text-white rounded-full p-0.5 z-20 shadow-lg">
+                                                <CheckCircle2 className="w-3 h-3" />
+                                              </div>
+                                            )}
+    
+                                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/piece:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2">
+                                              <div className="flex gap-2">
+                                                <button 
+                                                  onClick={(e) => updatePieceTransform(e, { rotation: (transformData.rotation - 90) % 360 })}
+                                                  className="p-1.5 bg-slate-800/80 hover:bg-slate-700 rounded text-white"
+                                                  title="Rotate Left"
+                                                >
+                                                  <RotateCcw className="w-4 h-4" />
+                                                </button>
+                                                <button 
+                                                  onClick={(e) => updatePieceTransform(e, { rotation: (transformData.rotation + 90) % 360 })}
+                                                  className="p-1.5 bg-slate-800/80 hover:bg-slate-700 rounded text-white"
+                                                  title="Rotate Right"
+                                                >
+                                                  <RotateCw className="w-4 h-4" />
+                                                </button>
+                                              </div>
+                                              <div className="flex gap-2">
+                                                <button 
+                                                  onClick={(e) => updatePieceTransform(e, { flipH: !transformData.flipH })}
+                                                  className={`p-1.5 rounded text-white ${transformData.flipH ? 'bg-indigo-600' : 'bg-slate-800/80 hover:bg-slate-700'}`}
+                                                  title="Flip Horizontal"
+                                                >
+                                                  <FlipHorizontal className="w-4 h-4" />
+                                                </button>
+                                                <button 
+                                                  onClick={(e) => updatePieceTransform(e, { flipV: !transformData.flipV })}
+                                                  className={`p-1.5 rounded text-white ${transformData.flipV ? 'bg-indigo-600' : 'bg-slate-800/80 hover:bg-slate-700'}`}
+                                                  title="Flip Vertical"
+                                                >
+                                                  <FlipVertical className="w-4 h-4" />
+                                                </button>
+                                              </div>
+                                            </div>
+    
+                                            <span className="absolute top-1 left-1 text-[10px] bg-black/70 px-1.5 py-0.5 rounded text-white shadow-sm pointer-events-none backdrop-blur-sm z-10">
+                                              {currIndex + 1}
+                                            </span>
+                                          </div>
+                                        );
+                                    });
+                                });
+                             })()
+                          }
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                  
+                  {imagePreviewUrl && currentTool === 'splitter' && (
+                    <div className="absolute bottom-8 right-8 z-50 flex bg-[#1e293b] border border-slate-700 rounded-lg shadow-2xl p-1 gap-1 items-center">
+                      <button onClick={() => setZoomLevel(z => Math.max(0.25, z - 0.25))} className="p-1.5 hover:bg-slate-700 rounded text-slate-300 hover:text-white" title="Zoom Out"><ZoomOut className="w-5 h-5"/></button>
+                      <span className="text-xs font-mono w-12 text-center text-slate-300">{Math.round(zoomLevel * 100)}%</span>
+                      <button onClick={() => setZoomLevel(z => Math.min(5, z + 0.25))} className="p-1.5 hover:bg-slate-700 rounded text-slate-300 hover:text-white" title="Zoom In"><ZoomIn className="w-5 h-5"/></button>
+                      <div className="w-px h-5 bg-slate-700 mx-1"></div>
+                      <button onClick={() => setZoomLevel(1)} className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-white" title="Fit to Screen"><RefreshCw className="w-4 h-4"/></button>
                     </div>
                   )}
-                </div>
-              )}
-            </main>
-
-            {imagePreviewUrl && currentTool === 'splitter' && (
-              <div className="absolute bottom-8 right-8 z-50 flex bg-[#1e293b] border border-slate-700 rounded-lg shadow-2xl p-1 gap-1 items-center">
-                <button onClick={() => setZoomLevel(z => Math.max(0.25, z - 0.25))} className="p-1.5 hover:bg-slate-700 rounded text-slate-300 hover:text-white" title="Zoom Out"><ZoomOut className="w-5 h-5"/></button>
-                <span className="text-xs font-mono w-12 text-center text-slate-300">{Math.round(zoomLevel * 100)}%</span>
-                <button onClick={() => setZoomLevel(z => Math.min(5, z + 0.25))} className="p-1.5 hover:bg-slate-700 rounded text-slate-300 hover:text-white" title="Zoom In"><ZoomIn className="w-5 h-5"/></button>
-                <div className="w-px h-5 bg-slate-700 mx-1"></div>
-                <button onClick={() => setZoomLevel(1)} className="p-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-white" title="Fit to Screen"><RefreshCw className="w-4 h-4"/></button>
-              </div>
-            )}
-          </>
-        )}
-
-
-        {/* === BACKGROUND REMOVER UI === */}
-        {currentTool === 'bg-remover' && (
-          <main className="flex-1 bg-[#0f172a] p-8 overflow-y-auto flex flex-col relative w-full">
+                </main>
+              ) : (
+                <main className="flex-1 bg-[#0f172a] p-8 overflow-y-auto flex flex-col relative w-full">
             <div className="max-w-6xl mx-auto w-full flex flex-col gap-8 pb-16">
               
               <div className="flex justify-between items-end">
