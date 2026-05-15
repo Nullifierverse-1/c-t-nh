@@ -5,7 +5,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import JSZip from 'jszip';
-import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical, Sparkles, Wand2, Maximize2 } from 'lucide-react';
+import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical, Sparkles, Wand2, Maximize2, Archive, Library } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
 import { removeBackgroundV2 } from './lib/bgRemoval';
@@ -28,8 +28,19 @@ type PieceTransform = {
   flipV: boolean;
 };
 
+interface LibraryItem {
+  id: string;
+  blob: Blob;
+  name: string;
+  previewUrl: string;
+}
+
 export default function App() {
   const [currentTool, setCurrentTool] = useState<ToolType>('splitter');
+  
+  // -- Library State --
+  const [libraryItems, setLibraryItems] = useState<LibraryItem[]>([]);
+  const [showLibrary, setShowLibrary] = useState<boolean>(false);
   
   // -- Splitter State --
   const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
@@ -47,6 +58,7 @@ export default function App() {
   const [isApplyingTransform, setIsApplyingTransform] = useState<boolean>(false);
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [pieceTransforms, setPieceTransforms] = useState<Record<number, PieceTransform>>({});
+  const [pieceNames, setPieceNames] = useState<Record<number, string>>({});
   const [selectedPieces, setSelectedPieces] = useState<Set<number>>(new Set());
   const [isUpscaling, setIsUpscaling] = useState<boolean>(false);
   const [isSharpening, setIsSharpening] = useState<boolean>(false);
@@ -81,6 +93,7 @@ export default function App() {
   };
   const totalSlices = getTotalSlices();
 
+  const [isDetectingGrid, setIsDetectingGrid] = useState<boolean>(false);
   const [previewMode, setPreviewMode] = useState<'grid' | 'exploded'>('grid');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -254,6 +267,7 @@ export default function App() {
       setVLinesPerRow(Array.from({ length: h.length + 1 }, () => []));
     }
     setPieceTransforms({});
+    setPieceNames({});
   };
 
   const handleReset = () => {
@@ -273,6 +287,7 @@ export default function App() {
     ]);
     setSelectedLine(null);
     setPieceTransforms({});
+    setPieceNames({});
     setSelectedPieces(new Set());
     setPreviewMode('grid');
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -396,6 +411,128 @@ export default function App() {
         setIsSharpening(false);
       }, 'image/png');
     };
+  };
+
+  const handleAutoDetectGrid = async () => {
+    if (!imageFile || !imagePreviewUrl || !imageSize) return;
+    
+    const apiKey = (process as any).env.GEMINI_API_KEY;
+    if (!apiKey) {
+      setError("Gemini API Key is missing. Please set GEMINI_API_KEY in your environment variables.");
+      return;
+    }
+
+    setIsDetectingGrid(true);
+    setError(null);
+
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      
+      const response = await fetch(imagePreviewUrl);
+      const blob = await response.blob();
+      const reader = new FileReader();
+      const base64Data = await new Promise<string>((resolve) => {
+        reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+        reader.readAsDataURL(blob);
+      });
+
+      const prompt = `Analyze this sprite sheet.
+Count the number of columns and rows of character sprites.
+Determine if the vertical dividing lines between columns should be slated/angled.
+Return a JSON object with this exact structure:
+{
+  "columns": number,
+  "rows": number,
+  "vLinesAngles": [
+    // Array of arrays. One array per row.
+    // Each inner array contains the angles (in degrees, from -75 to 75) for the vertical lines in that row.
+    // For example, if there are 4 columns, there are 3 vertical lines between them. So the inner array should have 3 numbers.
+    // E.g., for 3 columns, 2 rows: [[0, 5], [-5, 0]]
+  ]
+}
+Only output the JSON object, NO markdown formatting, NO extra text.`;
+
+      const genResponse = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: blob.type,
+              },
+            },
+            {
+              text: prompt,
+            },
+          ],
+        },
+        config: {
+          responseMimeType: "application/json",
+        }
+      });
+
+      let text = '';
+      for (const part of genResponse.candidates?.[0]?.content?.parts || []) {
+        if (part.text) {
+          text = part.text;
+          break;
+        }
+      }
+      
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        const jsonStr = text.replace(/\`\`\`json\n?/g, '').replace(/\`\`\`\n?/g, '').trim();
+        data = JSON.parse(jsonStr);
+      }
+
+      if (data && data.columns && data.rows) {
+        setColumnsStr(data.columns.toString());
+        setRowsStr(data.rows.toString());
+        
+        let c = data.columns;
+        let r = data.rows;
+        
+        let h: number[] = [];
+        if (r > 0) {
+          let step = 1 / r;
+          for (let i = step; i < 0.9999; i += step) h.push(i);
+          setHLines(h);
+        }
+        
+        if (c > 0) {
+          let vLineCount = Math.max(0, c - 1);
+          let defaultAngles = Array(vLineCount).fill(0);
+          
+          let vPerRow: {pos: number, angle: number}[][] = [];
+          
+          for (let rowIdx = 0; rowIdx < r; rowIdx++) {
+            let rowAngles = data.vLinesAngles?.[rowIdx] || defaultAngles;
+            let v: {pos: number, angle: number}[] = [];
+            let iCounter = 0;
+            let step = 1 / c;
+            for (let i = step; i < 0.9999; i += step) {
+              v.push({ pos: i, angle: rowAngles[iCounter] || 0 });
+              iCounter++;
+            }
+            vPerRow.push(v);
+          }
+          setVLinesPerRow(vPerRow);
+        } else {
+          setVLinesPerRow(Array.from({ length: h.length + 1 }, () => []));
+        }
+        setPieceTransforms({});
+        setPieceNames({});
+      }
+
+    } catch (err: any) {
+      console.error(err);
+      setError(err?.message || "Failed to auto-detect grid with AI.");
+    } finally {
+      setIsDetectingGrid(false);
+    }
   };
 
   const handleAIExpand = async () => {
@@ -603,7 +740,8 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                  canvas.toBlob((blob) => {
                    if (blob) {
                      const indexStr = index.toString().padStart(2, '0');
-                     const fileName = `${baseName}_slice_${indexStr}.png`;
+                     const customName = pieceNames[pieceIndexKey]?.trim();
+                     const fileName = customName ? `${customName}.png` : `${baseName}_slice_${indexStr}.png`;
                      
                      if (downloadAsZip) {
                        imgFolder!.file(fileName, blob);
@@ -653,6 +791,120 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
 
     } catch (err: any) {
       setError(err?.message || 'An error occurred while processing the image.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const splitAndSaveToLibrary = async () => {
+    if (!imageFile || !imagePreviewUrl) return;
+    setIsProcessing(true);
+    setError(null);
+
+    try {
+      const { img, ctx, canvas } = await getCanvasContext();
+      const baseName = downloadBaseName || 'image';
+      
+      const newItems: LibraryItem[] = [];
+      const slicePromises: Promise<void>[] = [];
+      const hPlacements = [0, ...[...hLines].sort((a,b)=>a-b), 1];
+      
+      let index = 1;
+      const W = img.width;
+      const H = img.height;
+      const slicesToSave = selectedPieces.size > 0 ? selectedPieces : null;
+      
+      for (let row = 0; row < hPlacements.length - 1; row++) {
+        const rowVLines = vLinesPerRow[row] || [];
+        const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
+        
+        const topY = hPlacements[row] * H;
+        const bottomY = hPlacements[row + 1] * H;
+        const centerY = (topY + bottomY) / 2;
+        
+        const getXAtY = (lineInfo: {pos: number, angle: number} | 'left' | 'right', y: number) => {
+            if (lineInfo === 'left') return 0;
+            if (lineInfo === 'right') return W;
+            const cx = lineInfo.pos * W;
+            const rad = lineInfo.angle * Math.PI / 180;
+            return cx - (y - centerY) * Math.tan(rad);
+        };
+
+        for (let col = 0; col <= sortedLines.length; col++) {
+           const currIndexZeroBased = index - 1;
+           const shouldSave = !slicesToSave || slicesToSave.has(currIndexZeroBased);
+           
+           if (shouldSave) {
+             const leftLine = col === 0 ? 'left' : sortedLines[col - 1];
+             const rightLine = col === sortedLines.length ? 'right' : sortedLines[col];
+             
+             const tlX = Math.max(0, Math.min(W, getXAtY(leftLine, topY)));
+             const blX = Math.max(0, Math.min(W, getXAtY(leftLine, bottomY)));
+             const trX = Math.max(0, Math.min(W, getXAtY(rightLine, topY)));
+             const brX = Math.max(0, Math.min(W, getXAtY(rightLine, bottomY)));
+             
+             const minX = Math.max(0, Math.floor(Math.min(tlX, blX, trX, brX)));
+             const maxX = Math.min(W, Math.ceil(Math.max(tlX, blX, trX, brX)));
+             
+             const slicePromise = new Promise<void>((resolve, reject) => {
+                 const sliceW = Math.round(maxX - minX);
+                 const sliceH = Math.round(bottomY - topY);
+                 
+                 const pieceIndexKey = index - 1;
+                 const t = pieceTransforms[pieceIndexKey] || { rotation: 0, flipH: false, flipV: false };
+  
+                 canvas.width = sliceW;
+                 canvas.height = sliceH;
+                 ctx.clearRect(0, 0, sliceW, sliceH);
+                 ctx.imageSmoothingEnabled = true;
+                 ctx.imageSmoothingQuality = 'high';
+                 
+                 ctx.save();
+                 ctx.translate(sliceW / 2, sliceH / 2);
+                 ctx.rotate((t.rotation || 0) * Math.PI / 180);
+                 ctx.scale(t.flipH ? -1 : 1, t.flipV ? -1 : 1);
+                 ctx.translate(-sliceW / 2, -sliceH / 2);
+  
+                 ctx.beginPath();
+                 ctx.moveTo(Math.round(tlX - minX), 0);
+                 ctx.lineTo(Math.round(trX - minX), 0);
+                 ctx.lineTo(Math.round(brX - minX), sliceH);
+                 ctx.lineTo(Math.round(blX - minX), sliceH);
+                 ctx.closePath();
+                 ctx.clip();
+                 
+                 ctx.drawImage(img, minX, Math.round(topY), sliceW, sliceH, 0, 0, sliceW, sliceH);
+                 ctx.restore();
+  
+                 canvas.toBlob((blob) => {
+                   if (blob) {
+                     const indexStr = index.toString().padStart(2, '0');
+                     const customName = pieceNames[pieceIndexKey]?.trim();
+                     const fileName = customName ? `${customName}.png` : `${baseName}_slice_${indexStr}.png`;
+                     
+                     newItems.push({
+                        id: Math.random().toString(36).substring(2, 9) + Date.now(),
+                        blob,
+                        name: fileName,
+                        previewUrl: URL.createObjectURL(blob)
+                     });
+                     resolve();
+                   } else {
+                     reject(new Error(`Failed to create blob for slice ${row},${col}`));
+                   }
+                 }, imageFile.type === 'image/jpeg' ? 'image/jpeg' : 'image/png', 1.0);
+             });
+             slicePromises.push(slicePromise);
+           }
+           index++;
+        }
+      }
+      
+      await Promise.all(slicePromises);
+      setLibraryItems(prev => [...prev, ...newItems]);
+      setShowLibrary(true);
+    } catch (err: any) {
+      setError(err?.message || 'An error occurred while saving to library.');
     } finally {
       setIsProcessing(false);
     }
@@ -888,6 +1140,16 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
               </button>
 
               <button 
+                onClick={splitAndSaveToLibrary}
+                disabled={isProcessing || isUpscaling}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm text-yellow-400 border-yellow-400/30"
+                title="Save the selected pieces to Library"
+              >
+                <Archive className="w-3.5 h-3.5" />
+                To Library
+              </button>
+
+              <button 
                 onClick={downloadFull}
                 disabled={isProcessing || isUpscaling}
                 className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm"
@@ -933,6 +1195,21 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                )}
             </>
           )}
+
+          <div className="w-px h-6 bg-slate-700 mx-2"></div>
+          
+          <button
+            onClick={() => setShowLibrary(true)}
+            className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-sm font-medium text-slate-300 border border-slate-700 transition-colors relative"
+          >
+            <Library className="w-4 h-4" />
+            Library
+            {libraryItems.length > 0 && (
+              <span className="absolute -top-2 -right-2 bg-indigo-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                {libraryItems.length}
+              </span>
+            )}
+          </button>
         </div>
       </header>
 
@@ -1065,6 +1342,14 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
 
                   <label className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-4">Grid Configuration</label>
                   <div className="space-y-4 mb-8">
+                    <button
+                      onClick={handleAutoDetectGrid}
+                      disabled={isDetectingGrid}
+                      className="w-full py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 rounded text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/20"
+                    >
+                      {isDetectingGrid ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                      {isDetectingGrid ? 'Detecting...' : 'Auto-Detect with AI'}
+                    </button>
                     <div>
                       <span className="text-sm font-medium mb-1 block">Columns</span>
                       <input
@@ -1663,7 +1948,20 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                                                 </button>
                                               </div>
                                             </div>
-    
+                                            
+                                            <div className="absolute bottom-1 left-1 right-1 z-30 flex justify-center">
+                                              <input
+                                                type="text"
+                                                placeholder={`slice_${(currIndex + 1).toString().padStart(2, '0')}`}
+                                                value={pieceNames[currIndex] || ''}
+                                                onClick={(e) => e.stopPropagation()}
+                                                onChange={(e) => {
+                                                  setPieceNames(prev => ({...prev, [currIndex]: e.target.value}));
+                                                }}
+                                                className={`w-[90%] text-xs px-1.5 py-1 bg-black/80 text-white rounded backdrop-blur-sm outline-none border border-transparent focus:border-indigo-400 transition-opacity text-center placeholder:text-gray-400 ${pieceNames[currIndex] ? 'opacity-100' : 'opacity-0 group-hover/piece:opacity-100 focus:opacity-100'}`}
+                                              />
+                                            </div>
+
                                             <span className="absolute top-1 left-1 text-[10px] bg-black/70 px-1.5 py-0.5 rounded text-white shadow-sm pointer-events-none backdrop-blur-sm z-10">
                                               {currIndex + 1}
                                             </span>
@@ -1875,6 +2173,130 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
           )}
         </AnimatePresence>
       </div>
+
+      {/* Library Slide-over Panel */}
+      <AnimatePresence>
+        {showLibrary && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowLibrary(false)}
+              className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 transition-opacity"
+            />
+            {/* Panel */}
+            <motion.div
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="fixed inset-y-0 right-0 w-96 bg-slate-900 border-l border-slate-800 shadow-2xl z-50 flex flex-col"
+            >
+              <div className="flex items-center justify-between p-4 border-b border-slate-800 bg-slate-800/50">
+                <div className="flex items-center gap-2">
+                  <Library className="w-5 h-5 text-indigo-400" />
+                  <h2 className="font-bold text-lg">My Library</h2>
+                  <span className="bg-indigo-500/20 text-indigo-300 text-xs px-2 py-0.5 rounded-full font-bold ml-2">
+                    {libraryItems.length}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setShowLibrary(false)}
+                  className="p-1.5 hover:bg-slate-700 rounded-full text-slate-400 hover:text-white transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 custom-scrollbar">
+                {libraryItems.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-slate-500 gap-3">
+                    <Archive className="w-12 h-12 opacity-20" />
+                    <p className="text-sm">Your library is empty.</p>
+                  </div>
+                ) : (
+                  libraryItems.map(item => (
+                    <div key={item.id} className="flex gap-3 bg-slate-800/50 p-2 rounded-lg border border-slate-700/50 group">
+                      <div className="w-20 h-20 bg-black/50 rounded pointer-events-none flex items-center justify-center shrink-0 checkerboard-bg">
+                         <img src={item.previewUrl} alt={item.name} className="max-w-full max-h-full object-contain" />
+                      </div>
+                      <div className="flex-1 min-w-0 flex flex-col justify-center">
+                        <input
+                           type="text"
+                           value={item.name}
+                           onChange={(e) => {
+                              setLibraryItems(prev => prev.map(i => i.id === item.id ? { ...i, name: e.target.value } : i));
+                           }}
+                           className="w-full bg-transparent text-sm font-medium text-slate-200 outline-none border-b border-transparent focus:border-indigo-500 mb-1 truncate"
+                        />
+                        <span className="text-[10px] text-slate-500 font-mono tracking-widest uppercase mb-2">{(item.blob.size / 1024).toFixed(1)} KB</span>
+                        <div className="flex gap-2">
+                          <a 
+                            href={item.previewUrl} 
+                            download={item.name}
+                            className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1"
+                          >
+                            <Download className="w-3 h-3" /> Save
+                          </a>
+                          <button 
+                            onClick={() => {
+                               URL.revokeObjectURL(item.previewUrl);
+                               setLibraryItems(prev => prev.filter(i => i.id !== item.id));
+                            }}
+                            className="text-xs font-semibold text-red-400 hover:text-red-300 transition-colors flex items-center gap-1 ml-auto"
+                          >
+                            <Trash2 className="w-3 h-3" /> Remove
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {libraryItems.length > 0 && (
+                <div className="p-4 border-t border-slate-800 bg-slate-900 flex flex-col gap-3">
+                  <button
+                    onClick={async () => {
+                        const zip = new JSZip();
+                        const folderName = `library_export`;
+                        const imgFolder = zip.folder(folderName);
+                        libraryItems.forEach(item => {
+                           let fileName = item.name.trim();
+                           if (!fileName.toLowerCase().endsWith('.png')) fileName += '.png';
+                           imgFolder!.file(fileName, item.blob);
+                        });
+                        const zipBlob = await zip.generateAsync({ type: 'blob' });
+                        const downloadUrl = URL.createObjectURL(zipBlob);
+                        const tempLink = document.createElement('a');
+                        tempLink.href = downloadUrl;
+                        tempLink.download = `${folderName}.zip`;
+                        document.body.appendChild(tempLink);
+                        tempLink.click();
+                        document.body.removeChild(tempLink);
+                        URL.revokeObjectURL(downloadUrl);
+                    }}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 rounded font-bold text-sm tracking-wide transition-all shadow-lg flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-4 h-4" /> Download All as ZIP
+                  </button>
+                  <button
+                     onClick={() => {
+                        libraryItems.forEach(item => URL.revokeObjectURL(item.previewUrl));
+                        setLibraryItems([]);
+                     }}
+                     className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-red-400 hover:text-red-300 border border-red-500/20 rounded font-bold text-xs transition-colors flex justify-center items-center gap-1.5"
+                  >
+                     <Trash2 className="w-3.5 h-3.5" /> Clear Library
+                  </button>
+                </div>
+              )}
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
       {/* Bottom Status Bar */}
       <footer className="h-8 bg-[#0f172a] border-t border-slate-800 flex items-center px-4 justify-between text-[10px] text-slate-500 shrink-0 font-medium tracking-wide uppercase">
