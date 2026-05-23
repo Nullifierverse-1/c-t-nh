@@ -248,8 +248,11 @@ export default function App() {
   };
 
   const updateGridLines = (cStr: string, rStr: string) => {
-    const c = parseFloat(cStr);
-    const r = parseFloat(rStr);
+    let c = Math.round(parseFloat(cStr));
+    let r = Math.round(parseFloat(rStr));
+    
+    if (isNaN(c) || c < 1) c = 1;
+    if (isNaN(r) || r < 1) r = 1;
     
     let h: number[] = [];
     if (r > 0) {
@@ -489,11 +492,10 @@ Only output the JSON object, NO markdown formatting, NO extra text.`;
       }
 
       if (data && data.columns && data.rows) {
-        setColumnsStr(data.columns.toString());
-        setRowsStr(data.rows.toString());
-        
-        let c = data.columns;
-        let r = data.rows;
+        const c = Math.round(Number(data.columns)) || 1;
+        const r = Math.round(Number(data.rows)) || 1;
+        setColumnsStr(c.toString());
+        setRowsStr(r.toString());
         
         let h: number[] = [];
         if (r > 0) {
@@ -1354,11 +1356,13 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                       <span className="text-sm font-medium mb-1 block">Columns</span>
                       <input
                         type="number"
-                        step="0.1"
+                        step="1"
+                        min="1"
                         value={columnsStr}
                         onChange={(e) => {
-                          setColumnsStr(e.target.value);
-                          updateGridLines(e.target.value, rowsStr);
+                          const cleanVal = e.target.value.replace(/[^0-9]/g, '');
+                          setColumnsStr(cleanVal);
+                          updateGridLines(cleanVal, rowsStr);
                         }}
                         className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
                       />
@@ -1367,11 +1371,13 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                       <span className="text-sm font-medium mb-1 block">Rows</span>
                       <input
                         type="number"
-                        step="0.1"
+                        step="1"
+                        min="1"
                         value={rowsStr}
                         onChange={(e) => {
-                          setRowsStr(e.target.value);
-                          updateGridLines(columnsStr, e.target.value);
+                          const cleanVal = e.target.value.replace(/[^0-9]/g, '');
+                          setRowsStr(cleanVal);
+                          updateGridLines(columnsStr, cleanVal);
                         }}
                         className="w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
                       />
