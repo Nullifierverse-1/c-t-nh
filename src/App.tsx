@@ -5,12 +5,58 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import JSZip from 'jszip';
-import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical, Sparkles, Wand2, Maximize2, Archive, Library } from 'lucide-react';
+import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical, Sparkles, Wand2, Maximize2, Archive, Library, Plus, ArrowUp, ArrowDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
 import { removeBackgroundV2 } from './lib/bgRemoval';
 
-type ToolType = 'splitter' | 'bg-remover' | 'ai-expand';
+type ToolType = 'splitter' | 'bg-remover' | 'ai-expand' | 'stitcher';
+
+type StitchFile = {
+  id: string;
+  file: File;
+  previewUrl: string;
+  width: number;
+  height: number;
+  rotation: number; // 0, 90, 180, 270
+  flipH: boolean;
+  flipV: boolean;
+  name: string;
+};
+
+const loadImage = (url: string): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(e);
+    img.src = url;
+  });
+};
+
+const drawImageWithTransform = (
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+  rotation: number,
+  flipH: boolean,
+  flipV: boolean
+) => {
+  ctx.save();
+  ctx.translate(dx + dw / 2, dy + dh / 2);
+  ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+  ctx.rotate((rotation * Math.PI) / 180);
+  
+  const is90or270 = rotation === 90 || rotation === 270;
+  const drawW = is90or270 ? dh : dw;
+  const drawH = is90or270 ? dw : dh;
+  
+  ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
+  ctx.restore();
+};
 
 type BgFile = {
   id: string;
@@ -113,6 +159,18 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bgFileInputRef = useRef<HTMLInputElement>(null);
   const imageElementRef = useRef<HTMLImageElement>(null);
+  const stitchFileInputRef = useRef<HTMLInputElement>(null);
+
+  // -- Stitcher State --
+  const [stitchFiles, setStitchFiles] = useState<StitchFile[]>([]);
+  const [stitchLayout, setStitchLayout] = useState<'horizontal' | 'vertical' | 'grid'>('horizontal');
+  const [stitchColumns, setStitchColumns] = useState<number>(2);
+  const [stitchGap, setStitchGap] = useState<number>(10);
+  const [stitchPadding, setStitchPadding] = useState<number>(10);
+  const [stitchBgColor, setStitchBgColor] = useState<string>('#0f172a');
+  const [stitchAlignment, setStitchAlignment] = useState<'start' | 'center' | 'end'>('center');
+  const [stitchResizeMode, setStitchResizeMode] = useState<'original' | 'match-max' | 'match-min'>('match-max');
+  const [stitchPreviewUrl, setStitchPreviewUrl] = useState<string | null>(null);
 
   // --- Splitter Logic ---
   const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
@@ -912,6 +970,443 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
     }
   };
 
+  // --- Stitcher Logic ---
+  const addStitchFiles = (files: FileList) => {
+    setError(null);
+    const newFiles: StitchFile[] = [];
+    const promises: Promise<void>[] = [];
+
+    Array.from(files).forEach((file) => {
+      if (!file.type.startsWith('image/')) {
+        setError('Only image files are allowed in Stitcher.');
+        return;
+      }
+      const p = new Promise<void>((resolve) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          newFiles.push({
+            id: Math.random().toString(36).substring(2, 9) + Date.now(),
+            file,
+            previewUrl: url,
+            width: img.width,
+            height: img.height,
+            rotation: 0,
+            flipH: false,
+            flipV: false,
+            name: file.name.substring(0, file.name.lastIndexOf('.')) || 'image'
+          });
+          resolve();
+        };
+        img.onerror = () => {
+          resolve(); // skip bad images
+        };
+        img.src = url;
+      });
+      promises.push(p);
+    });
+
+    Promise.all(promises).then(() => {
+      if (newFiles.length > 0) {
+        setStitchFiles((prev) => [...prev, ...newFiles]);
+      }
+    });
+  };
+
+  const rotateStitchFile = (id: string, degree: number) => {
+    setStitchFiles(prev => prev.map(f => {
+      if (f.id === id) {
+        let nextRot = (f.rotation + degree) % 360;
+        if (nextRot < 0) nextRot += 360;
+        return { ...f, rotation: nextRot };
+      }
+      return f;
+    }));
+  };
+
+  const flipStitchFile = (id: string, dir: 'h' | 'v') => {
+    setStitchFiles(prev => prev.map(f => {
+      if (f.id === id) {
+        return {
+          ...f,
+          flipH: dir === 'h' ? !f.flipH : f.flipH,
+          flipV: dir === 'v' ? !f.flipV : f.flipV
+        };
+      }
+      return f;
+    }));
+  };
+
+  const moveStitchFile = (index: number, direction: 'up' | 'down') => {
+    if (direction === 'up' && index === 0) return;
+    if (direction === 'down' && index === stitchFiles.length - 1) return;
+    
+    setStitchFiles(prev => {
+      const nextList = [...prev];
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      const temp = nextList[index];
+      nextList[index] = nextList[targetIndex];
+      nextList[targetIndex] = temp;
+      return nextList;
+    });
+  };
+
+  const removeStitchFile = (id: string) => {
+    setStitchFiles(prev => {
+      const target = prev.find(f => f.id === id);
+      if (target) {
+        URL.revokeObjectURL(target.previewUrl);
+      }
+      return prev.filter(f => f.id !== id);
+    });
+  };
+
+  const clearStitchFiles = () => {
+    stitchFiles.forEach((file) => URL.revokeObjectURL(file.previewUrl));
+    setStitchFiles([]);
+    if (stitchPreviewUrl) {
+      URL.revokeObjectURL(stitchPreviewUrl);
+      setStitchPreviewUrl(null);
+    }
+    if (stitchFileInputRef.current) stitchFileInputRef.current.value = '';
+  };
+
+  const downloadStitched = async () => {
+    if (stitchFiles.length === 0 || !stitchPreviewUrl) return;
+    setIsProcessing(true);
+    try {
+      const response = await fetch(stitchPreviewUrl);
+      const blob = await response.blob();
+      const downloadUrl = URL.createObjectURL(blob);
+      const tempLink = document.createElement('a');
+      tempLink.href = downloadUrl;
+      tempLink.download = `stitched_image_${Date.now()}.png`;
+      document.body.appendChild(tempLink);
+      tempLink.click();
+      document.body.removeChild(tempLink);
+      URL.revokeObjectURL(downloadUrl);
+    } catch (e) {
+      setError('Failed to download stitched image.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const saveStitchedToLibrary = async () => {
+    if (stitchFiles.length === 0 || !stitchPreviewUrl) return;
+    setIsProcessing(true);
+    try {
+      const response = await fetch(stitchPreviewUrl);
+      const blob = await response.blob();
+      const name = `stitched_${Date.now()}.png`;
+      const newItem: LibraryItem = {
+        id: Math.random().toString(36).substring(2, 9) + Date.now(),
+        blob,
+        name,
+        previewUrl: URL.createObjectURL(blob)
+      };
+      setLibraryItems(prev => [...prev, newItem]);
+      setShowLibrary(true);
+    } catch (e) {
+      setError('Failed to save stitched image to library.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleStitchFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      addStitchFiles(e.target.files);
+    }
+  };
+
+  const handleStitchDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setDragActive(true);
+    } else if (e.type === 'dragleave') {
+      setDragActive(false);
+    }
+  };
+
+  const handleStitchDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      addStitchFiles(e.dataTransfer.files);
+    }
+  };
+
+  useEffect(() => {
+    if (currentTool !== 'stitcher' || stitchFiles.length === 0) {
+      if (stitchPreviewUrl) {
+        URL.revokeObjectURL(stitchPreviewUrl);
+        setStitchPreviewUrl(null);
+      }
+      return;
+    }
+
+    let isCancelled = false;
+    
+    const generateStitchedImage = async () => {
+      try {
+        const imgs = await Promise.all(
+          stitchFiles.map(async (file) => {
+            const img = await loadImage(file.previewUrl);
+            return { file, img };
+          })
+        );
+        
+        if (isCancelled) return;
+
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const items = imgs.map(({ file, img }) => {
+          const rotationRad = (file.rotation * Math.PI) / 180;
+          const cos = Math.abs(Math.cos(rotationRad));
+          const sin = Math.abs(Math.sin(rotationRad));
+          const rw = img.width * cos + img.height * sin;
+          const rh = img.width * sin + img.height * cos;
+          return {
+            file,
+            img,
+            rw,
+            rh
+          };
+        });
+
+        const N = items.length;
+        let canvasW = 0;
+        let canvasH = 0;
+
+        interface DrawBox {
+          img: HTMLImageElement;
+          dx: number;
+          dy: number;
+          dw: number;
+          dh: number;
+          rotation: number;
+          flipH: boolean;
+          flipV: boolean;
+        }
+        const drawBoxes: DrawBox[] = [];
+
+        if (stitchLayout === 'horizontal') {
+          let targetH = 0;
+          if (stitchResizeMode === 'match-max') {
+            targetH = Math.max(...items.map(i => i.rh));
+          } else if (stitchResizeMode === 'match-min') {
+            targetH = Math.min(...items.map(i => i.rh));
+          } else {
+            targetH = -1;
+          }
+
+          const scaledItems = items.map((item) => {
+            let itemH = item.rh;
+            let itemW = item.rw;
+            let scale = 1;
+            if (targetH > 0) {
+              scale = targetH / itemH;
+              itemH = targetH;
+              itemW = itemW * scale;
+            }
+            return { ...item, dw: itemW, dh: itemH };
+          });
+
+          const maxH = Math.max(...scaledItems.map(i => i.dh));
+          canvasH = stitchPadding * 2 + maxH;
+
+          let currentX = stitchPadding;
+          scaledItems.forEach((item) => {
+            let drawY = stitchPadding;
+            if (stitchAlignment === 'center') {
+              drawY = stitchPadding + (maxH - item.dh) / 2;
+            } else if (stitchAlignment === 'end') {
+              drawY = stitchPadding + (maxH - item.dh);
+            }
+
+            drawBoxes.push({
+              img: item.img,
+              dx: currentX,
+              dy: drawY,
+              dw: item.dw,
+              dh: item.dh,
+              rotation: item.file.rotation,
+              flipH: item.file.flipH,
+              flipV: item.file.flipV
+            });
+            currentX += item.dw + stitchGap;
+          });
+          canvasW = currentX - stitchGap + stitchPadding;
+          if (canvasW < stitchPadding * 2) canvasW = stitchPadding * 2;
+
+        } else if (stitchLayout === 'vertical') {
+          let targetW = 0;
+          if (stitchResizeMode === 'match-max') {
+            targetW = Math.max(...items.map(i => i.rw));
+          } else if (stitchResizeMode === 'match-min') {
+            targetW = Math.min(...items.map(i => i.rw));
+          } else {
+            targetW = -1;
+          }
+
+          const scaledItems = items.map((item) => {
+            let itemW = item.rw;
+            let itemH = item.rh;
+            let scale = 1;
+            if (targetW > 0) {
+              scale = targetW / itemW;
+              itemW = targetW;
+              itemH = itemH * scale;
+            }
+            return { ...item, dw: itemW, dh: itemH };
+          });
+
+          const maxW = Math.max(...scaledItems.map(i => i.dw));
+          canvasW = stitchPadding * 2 + maxW;
+
+          let currentY = stitchPadding;
+          scaledItems.forEach((item) => {
+            let drawX = stitchPadding;
+            if (stitchAlignment === 'center') {
+              drawX = stitchPadding + (maxW - item.dw) / 2;
+            } else if (stitchAlignment === 'end') {
+              drawX = stitchPadding + (maxW - item.dw);
+            }
+
+            drawBoxes.push({
+              img: item.img,
+              dx: drawX,
+              dy: currentY,
+              dw: item.dw,
+              dh: item.dh,
+              rotation: item.file.rotation,
+              flipH: item.file.flipH,
+              flipV: item.file.flipV
+            });
+            currentY += item.dh + stitchGap;
+          });
+          canvasH = currentY - stitchGap + stitchPadding;
+          if (canvasH < stitchPadding * 2) canvasH = stitchPadding * 2;
+
+        } else if (stitchLayout === 'grid') {
+          const cols = Math.max(1, stitchColumns);
+          const rows = Math.ceil(N / cols);
+
+          let maxCellW = Math.max(...items.map(i => i.rw));
+          let maxCellH = Math.max(...items.map(i => i.rh));
+
+          if (stitchResizeMode === 'match-min') {
+            maxCellW = Math.min(...items.map(i => i.rw));
+            maxCellH = Math.min(...items.map(i => i.rh));
+          }
+
+          canvasW = stitchPadding * 2 + cols * maxCellW + (cols - 1) * stitchGap;
+          canvasH = stitchPadding * 2 + rows * maxCellH + (rows - 1) * stitchGap;
+
+          items.forEach((item, idx) => {
+            const r = Math.floor(idx / cols);
+            const c = idx % cols;
+
+            const cellX = stitchPadding + c * (maxCellW + stitchGap);
+            const cellY = stitchPadding + r * (maxCellH + stitchGap);
+
+            let drawW = item.rw;
+            let drawH = item.rh;
+            
+            if (stitchResizeMode !== 'original') {
+              const scale = Math.min(maxCellW / item.rw, maxCellH / item.rh);
+              drawW = item.rw * scale;
+              drawH = item.rh * scale;
+            }
+
+            let drawX = cellX;
+            let drawY = cellY;
+
+            if (stitchAlignment === 'center') {
+              drawX = cellX + (maxCellW - drawW) / 2;
+              drawY = cellY + (maxCellH - drawH) / 2;
+            } else if (stitchAlignment === 'end') {
+              drawX = cellX + (maxCellW - drawW);
+              drawY = cellY + (maxCellH - drawH);
+            }
+
+            drawBoxes.push({
+              img: item.img,
+              dx: drawX,
+              dy: drawY,
+              dw: drawW,
+              dh: drawH,
+              rotation: item.file.rotation,
+              flipH: item.file.flipH,
+              flipV: item.file.flipV
+            });
+          });
+        }
+
+        if (canvasW <= 0 || canvasH <= 0) return;
+        canvas.width = canvasW;
+        canvas.height = canvasH;
+
+        if (stitchBgColor === 'transparent') {
+          ctx.clearRect(0, 0, canvasW, canvasH);
+        } else {
+          ctx.fillStyle = stitchBgColor;
+          ctx.fillRect(0, 0, canvasW, canvasH);
+        }
+
+        drawBoxes.forEach((box) => {
+          drawImageWithTransform(
+            ctx,
+            box.img,
+            box.dx,
+            box.dy,
+            box.dw,
+            box.dh,
+            box.rotation,
+            box.flipH,
+            box.flipV
+          );
+        });
+
+        if (isCancelled) return;
+
+        canvas.toBlob((blob) => {
+          if (blob && !isCancelled) {
+            const url = URL.createObjectURL(blob);
+            setStitchPreviewUrl((oldUrl) => {
+              if (oldUrl) URL.revokeObjectURL(oldUrl);
+              return url;
+            });
+          }
+        }, 'image/png');
+
+      } catch (err) {
+        console.error('Error generating stitch preview:', err);
+      }
+    };
+
+    generateStitchedImage();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    stitchFiles,
+    stitchLayout,
+    stitchColumns,
+    stitchGap,
+    stitchPadding,
+    stitchBgColor,
+    stitchAlignment,
+    stitchResizeMode,
+    currentTool
+  ]);
+
   // --- BG Remover Logic ---
   const handleBgDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -1051,163 +1546,57 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
     <div className="h-screen w-full bg-[#0f172a] text-slate-200 flex flex-col font-sans overflow-hidden">
       
       {/* Top Navigation Bar */}
-      <header className="h-14 bg-[#1e293b] border-b border-slate-700 flex items-center justify-between px-6 shrink-0">
+      <header className="h-14 bg-[#1e293b] border-b border-slate-700 flex items-center justify-between px-6 shrink-0 z-20">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center">
+            <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center shadow-md shadow-indigo-500/20">
               <Scissors className="w-4 h-4 text-white" />
             </div>
-            <span className="font-bold text-lg tracking-tight hidden sm:block">Slice&nbsp;&amp;&nbsp;Dice</span>
+            <span className="font-bold text-lg tracking-tight hidden md:block text-white">Slice&nbsp;&amp;&nbsp;Dice</span>
           </div>
           
           {/* Tool Switcher */}
-          <div className="flex items-center bg-slate-800 p-1 rounded-lg">
+          <div className="flex items-center bg-slate-800 p-1 rounded-lg border border-slate-705 shadow-inner">
             <button 
               onClick={() => setCurrentTool('splitter')} 
-              className={`px-3 py-1.5 rounded text-sm font-medium transition-all ${currentTool === 'splitter' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}
+              className={`px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-all ${currentTool === 'splitter' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-250 hover:bg-slate-750'}`}
             >
               Image Splitter
             </button>
             <button 
               onClick={() => setCurrentTool('bg-remover')} 
-              className={`px-3 py-1.5 rounded text-sm font-medium transition-all flex items-center gap-1.5 ${currentTool === 'bg-remover' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}
+              className={`px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-all flex items-center gap-1.5 ${currentTool === 'bg-remover' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-250 hover:bg-slate-750'}`}
             >
-              Background Remover
-              <span className="bg-indigo-500/20 text-indigo-300 text-[10px] px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">New</span>
+              Bg Remover
+              <span className="hidden sm:inline bg-indigo-500/20 text-indigo-300 text-[9px] px-1.5 py-0.5 rounded-full uppercase tracking-wider font-bold">New</span>
             </button>
             <button 
               onClick={() => setCurrentTool('ai-expand')} 
-              className={`px-3 py-1.5 rounded text-sm font-medium transition-all flex items-center gap-1.5 ${currentTool === 'ai-expand' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}
+              className={`px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-all flex items-center gap-1.5 ${currentTool === 'ai-expand' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-250 hover:bg-slate-750'}`}
             >
               AI Expand
-              <Maximize2 className="w-3.5 h-3.5" />
+              <Maximize2 className="w-3 h-3 text-indigo-400" />
+            </button>
+            <button 
+              onClick={() => setCurrentTool('stitcher')} 
+              className={`px-3 py-1.5 rounded-md text-xs sm:text-sm font-medium transition-all flex items-center gap-1.5 ${currentTool === 'stitcher' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-250 hover:bg-slate-750'}`}
+            >
+              Stitcher
+              <Grid3X3 className="w-3 h-3 text-indigo-400" />
             </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          {/* Global 'Save as ZIP' Toggle */}
-          {(currentTool === 'splitter' && imagePreviewUrl) || (currentTool === 'bg-remover' && bgFiles.length > 0) ? (
-            <label className="flex items-center gap-2 text-sm text-slate-300 font-medium cursor-pointer bg-slate-800/50 px-3 py-1.5 rounded border border-slate-700 hover:bg-slate-800 transition-colors">
-              <input 
-                type="checkbox" 
-                checked={downloadAsZip} 
-                onChange={(e) => setDownloadAsZip(e.target.checked)}
-                className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-indigo-500/50"
-              />
-              Save as ZIP
-            </label>
-          ) : null}
-
-          {currentTool === 'ai-expand' && imagePreviewUrl && (
-            <div className="flex items-center gap-2">
-              <button 
-                onClick={() => setExpandOffsets({top: 0, bottom: 0, left: 0, right: 0})}
-                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium transition-colors border border-slate-600"
-              >
-                Reset Handles
-              </button>
-              <div className="w-px h-6 bg-slate-700 mx-1"></div>
-              <button
-                onClick={handleAIExpand}
-                disabled={isExpandingAI || isProcessing}
-                className="px-4 py-1.5 bg-pink-600 hover:bg-pink-500 rounded text-sm font-bold transition-all shadow-lg shadow-pink-500/20 disabled:opacity-50 flex items-center gap-2"
-              >
-                {isExpandingAI ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                Generate Expansion
-              </button>
-            </div>
-          )}
-
-          {currentTool === 'splitter' && imagePreviewUrl && (
-            <div className="flex items-center gap-2">
-              <button 
-                onClick={handleReset}
-                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs font-medium transition-colors border border-slate-600"
-                title="Start over with a new image"
-              >
-                Reset
-              </button>
-
-              <div className="w-px h-6 bg-slate-700 mx-1"></div>
-
-              <button
-                onClick={handleUpscale}
-                disabled={isUpscaling || isProcessing || isSharpening}
-                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm"
-                title="Upscale image resolution by 2x"
-              >
-                {isUpscaling ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ZoomIn className="w-3.5 h-3.5" />}
-                Upscale 2x
-              </button>
-
-              <button 
-                onClick={splitAndSaveToLibrary}
-                disabled={isProcessing || isUpscaling}
-                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm text-yellow-400 border-yellow-400/30"
-                title="Save the selected pieces to Library"
-              >
-                <Archive className="w-3.5 h-3.5" />
-                To Library
-              </button>
-
-              <button 
-                onClick={downloadFull}
-                disabled={isProcessing || isUpscaling}
-                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm"
-                title="Download the current full image (with transforms applied)"
-              >
-                <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
-                Save Full
-              </button>
-
-              <button 
-                onClick={splitAndDownload}
-                disabled={isProcessing || isUpscaling}
-                className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-bold transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50 flex items-center gap-2"
-              >
-                {isProcessing ? (
-                  <><RefreshCw className="w-4 h-4 animate-spin" /> ...</>
-                ) : (
-                  <>
-                    <Download className="w-4 h-4" />
-                    {selectedPieces.size > 0 ? `Save Selected (${selectedPieces.size})` : `Download Grid (${totalSlices})`}
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-
-          {currentTool === 'bg-remover' && bgFiles.length > 0 && (
-            <>
-               <button 
-                 onClick={clearBgFiles}
-                 className="px-4 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-sm font-medium transition-colors border border-slate-600"
-               >
-                 Clear All
-               </button>
-               {bgFiles.some(f => f.status === 'done') && (
-                 <button 
-                   onClick={downloadAllBg}
-                   disabled={isProcessing}
-                   className="px-4 py-1.5 bg-green-600 hover:bg-green-500 rounded text-sm font-medium transition-colors shadow-lg shadow-green-500/20 disabled:opacity-50 flex items-center gap-2"
-                 >
-                   {isProcessing ? <><RefreshCw className="w-4 h-4 animate-spin" /> Saving...</> : <>Download All</>}
-                 </button>
-               )}
-            </>
-          )}
-
-          <div className="w-px h-6 bg-slate-700 mx-2"></div>
-          
+        <div className="flex items-center gap-3">
           <button
             onClick={() => setShowLibrary(true)}
-            className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-sm font-medium text-slate-300 border border-slate-700 transition-colors relative"
+            className="flex items-center gap-2 px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium text-slate-300 border border-slate-700 hover:border-slate-600 shadow transition-all relative"
+            title="Open stored images library"
           >
-            <Library className="w-4 h-4" />
-            Library
+            <Library className="w-4 h-4 text-yellow-500" />
+            <span className="hidden sm:inline">Library</span>
             {libraryItems.length > 0 && (
-              <span className="absolute -top-2 -right-2 bg-indigo-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+              <span className="absolute -top-1.5 -right-1.5 bg-indigo-500 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-full shadow-md animate-pulse">
                 {libraryItems.length}
               </span>
             )}
@@ -1215,10 +1604,208 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
         </div>
       </header>
 
+      {/* Contextual Options Toolbar (Secondary Action Bar) */}
+      {((currentTool === 'splitter' && imagePreviewUrl) || 
+        (currentTool === 'ai-expand' && imagePreviewUrl) || 
+        (currentTool === 'bg-remover' && bgFiles.length > 0) || 
+        (currentTool === 'stitcher' && stitchFiles.length > 0)) && (
+        <div className="bg-[#1b2537] border-b border-slate-800 py-2.5 px-6 flex flex-wrap items-center justify-between gap-4 shrink-0 transition-all z-10 w-full">
+          
+          {/* Leftside Metadata or Instructions */}
+          <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
+            {currentTool === 'splitter' && (
+              <>
+                <span className="bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-bold uppercase tracking-wider text-[10px]">Image Splitter Workspace</span>
+                {originalSize && (
+                  <span className="hidden sm:inline text-slate-400 font-medium">• {originalSize.width}x{originalSize.height} original • {totalSlices} grid slices</span>
+                )}
+              </>
+            )}
+            {currentTool === 'ai-expand' && (
+              <>
+                <span className="bg-pink-500/10 text-pink-400 border border-pink-500/20 px-2 py-0.5 rounded font-bold uppercase tracking-wider text-[10px]">AI Expansion Sandbox</span>
+                {originalSize && (
+                  <span className="hidden sm:inline text-slate-400 font-medium">• Canvas: {originalSize.width}x{originalSize.height} • Define margins in sidebar</span>
+                )}
+              </>
+            )}
+            {currentTool === 'bg-remover' && (
+              <>
+                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded font-bold uppercase tracking-wider text-[10px]">Remover Sandbox</span>
+                <span className="hidden sm:inline text-slate-400 font-medium">• {bgFiles.length} files • {bgFiles.filter(f => f.status === 'done').length} processed</span>
+              </>
+            )}
+            {currentTool === 'stitcher' && (
+              <>
+                <span className="bg-indigo-500/10 text-violet-400 border border-violet-550/20 px-2 py-0.5 rounded font-bold uppercase tracking-wider text-[10px]">Stitch Compositor</span>
+                <span className="hidden sm:inline text-slate-400 font-medium">• {stitchFiles.length} slice blocks • Mode: {stitchLayout}</span>
+              </>
+            )}
+          </div>
+
+          {/* Rightside Action Buttons */}
+          <div className="flex items-center flex-wrap gap-2 sm:gap-3">
+            {/* Global ZIP Option where applicable */}
+            {((currentTool === 'splitter' && imagePreviewUrl) || (currentTool === 'bg-remover' && bgFiles.length > 0)) && (
+              <label className="flex items-center gap-2 text-xs text-slate-300 font-semibold cursor-pointer bg-slate-800/40 hover:bg-slate-800/80 px-2.5 py-1.5 rounded-lg border border-slate-700/80 hover:border-slate-600 transition-colors">
+                <input 
+                  type="checkbox" 
+                  checked={downloadAsZip} 
+                  onChange={(e) => setDownloadAsZip(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-700 text-indigo-500 focus:ring-indigo-500/50"
+                />
+                Save as ZIP
+              </label>
+            )}
+
+            {/* Splitter Actions */}
+            {currentTool === 'splitter' && imagePreviewUrl && (
+              <>
+                <button 
+                  onClick={handleReset}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold transition-colors border border-slate-700 text-slate-300 hover:text-white"
+                  title="Upload a different image"
+                >
+                  Reset Image
+                </button>
+
+                <div className="w-px h-5 bg-slate-800 hidden sm:block"></div>
+
+                <button
+                  onClick={handleUpscale}
+                  disabled={isUpscaling || isProcessing || isSharpening}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold transition-all border border-slate-700 text-slate-300 hover:text-white flex items-center gap-1.5 shadow-sm"
+                  title="Upscale image resolution by 2x"
+                >
+                  {isUpscaling ? <RefreshCw className="w-3 h-3 animate-spin text-indigo-400" /> : <ZoomIn className="w-3 h-3 text-indigo-450" />}
+                  Upscale 2x
+                </button>
+
+                <button 
+                  onClick={splitAndSaveToLibrary}
+                  disabled={isProcessing || isUpscaling}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm text-yellow-400 border-yellow-400/20 hover:border-yellow-400/30"
+                  title="Create slices and save them into Library"
+                >
+                  <Archive className="w-3 h-3" />
+                  Save Slices to Library
+                </button>
+
+                <button 
+                  onClick={downloadFull}
+                  disabled={isProcessing || isUpscaling}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold transition-all border border-slate-700 flex items-center gap-1.5 shadow-sm text-slate-300 hover:text-white"
+                  title="Download the reconstructed image with current dimensions and filter effects"
+                >
+                  <ImageIcon className="w-3 h-3 text-indigo-400" />
+                  Save Full Image
+                </button>
+
+                <button 
+                  onClick={splitAndDownload}
+                  disabled={isProcessing || isUpscaling}
+                  className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-indigo-600/10 flex items-center gap-1.5"
+                >
+                  {isProcessing ? (
+                    <><RefreshCw className="w-3.5 h-3.5 animate-spin text-white" /> Splitting...</>
+                  ) : (
+                    <>
+                      <Download className="w-3.5 h-3.5 text-white" />
+                      {selectedPieces.size > 0 ? `Download Selected (${selectedPieces.size})` : `Download Grid (${totalSlices})`}
+                    </>
+                  )}
+                </button>
+              </>
+            )}
+
+            {/* AI Expand Actions */}
+            {currentTool === 'ai-expand' && imagePreviewUrl && (
+              <>
+                <button 
+                  onClick={() => setExpandOffsets({top: 0, bottom: 0, left: 0, right: 0})}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold border border-slate-700 text-slate-300 hover:text-white transition-colors"
+                >
+                  Reset Handles
+                </button>
+                <div className="w-px h-5 bg-slate-800"></div>
+                <button
+                  onClick={handleAIExpand}
+                  disabled={isExpandingAI || isProcessing}
+                  className="px-4 py-1.5 bg-pink-600 hover:bg-pink-500 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-pink-600/10 flex items-center gap-1.5"
+                >
+                  {isExpandingAI ? <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" /> : <Wand2 className="w-3.5 h-3.5 text-white" />}
+                  Generate Expansion
+                </button>
+              </>
+            )}
+
+            {/* Background Remover Actions */}
+            {currentTool === 'bg-remover' && bgFiles.length > 0 && (
+              <>
+                <button 
+                  onClick={clearBgFiles}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold border border-slate-700 text-slate-300 hover:text-white transition-colors"
+                >
+                  Clear All
+                </button>
+                {bgFiles.some(f => f.status === 'done') && (
+                  <button 
+                    onClick={downloadAllBg}
+                    disabled={isProcessing}
+                    className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-emerald-600/15 flex items-center gap-1.5"
+                  >
+                    {isProcessing ? <><RefreshCw className="w-3.5 h-3.5 animate-spin text-white" /> Saving...</> : <><Download className="w-3.5 h-3.5 text-white" /> Download All</>}
+                  </button>
+                )}
+              </>
+            )}
+
+            {/* Image Stitcher Actions */}
+            {currentTool === 'stitcher' && stitchFiles.length > 0 && (
+              <>
+                <button 
+                  onClick={clearStitchFiles}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold border border-slate-700 text-slate-300 hover:text-white transition-colors"
+                >
+                  Clear All Pieces
+                </button>
+
+                <button 
+                  onClick={saveStitchedToLibrary}
+                  disabled={isProcessing}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold border border-slate-700 text-yellow-400 border-yellow-400/20 hover:border-yellow-400/30 flex items-center gap-1.5 transition-all"
+                  title="Save final composite into library to edit/slice again"
+                >
+                  <Archive className="w-3 h-3 hover:text-yellow-300" />
+                  Save to Library
+                </button>
+
+                <button 
+                  onClick={downloadStitched}
+                  disabled={isProcessing}
+                  className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-indigo-600/15 flex items-center gap-1.5"
+                  title="Download the compiled stitched image"
+                >
+                  {isProcessing ? (
+                    <><RefreshCw className="w-3.5 h-3.5 animate-spin text-white" /> Stitching...</>
+                  ) : (
+                    <>
+                      <Download className="w-3.5 h-3.5 text-white" />
+                      Download Stitch
+                    </>
+                  )}
+                </button>
+              </>
+            )}
+          </div>
+
+        </div>
+      )}
+
       <div className="flex flex-1 overflow-hidden relative">
         
         {/* === SIDEBARS === */}
-        {imagePreviewUrl && (
+        {((imagePreviewUrl && (currentTool === 'splitter' || currentTool === 'ai-expand')) || (currentTool === 'stitcher')) && (
           <>
             {/* Splitter Sidebar */}
             {currentTool === 'splitter' && (
@@ -1505,11 +2092,261 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                 </div>
               </aside>
             )}
+
+            {/* Stitcher Sidebar */}
+            {currentTool === 'stitcher' && (
+              <aside className="w-80 bg-[#1e293b] border-r border-slate-700 p-6 flex flex-col gap-8 shrink-0 overflow-y-auto custom-scrollbar">
+                <div className="space-y-6">
+                  <div>
+                    <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block mb-3">Layout Arrangement</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button 
+                        onClick={() => setStitchLayout('horizontal')}
+                        className={`py-2 px-3 rounded text-xs font-semibold border flex flex-col items-center justify-center gap-1.5 transition-all ${
+                          stitchLayout === 'horizontal' ? 'bg-indigo-600 border-indigo-500 text-white shadow-md' : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <FlipHorizontal className="w-4 h-4" />
+                        <span>Horizontal</span>
+                      </button>
+                      <button 
+                        onClick={() => setStitchLayout('vertical')}
+                        className={`py-2 px-3 rounded text-xs font-semibold border flex flex-col items-center justify-center gap-1.5 transition-all ${
+                          stitchLayout === 'vertical' ? 'bg-indigo-600 border-indigo-500 text-white shadow-md' : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <FlipVertical className="w-4 h-4" />
+                        <span>Vertical</span>
+                      </button>
+                      <button 
+                        onClick={() => setStitchLayout('grid')}
+                        className={`py-2 px-3 rounded text-xs font-semibold border flex flex-col items-center justify-center gap-1.5 transition-all ${
+                          stitchLayout === 'grid' ? 'bg-indigo-600 border-indigo-500 text-white shadow-md' : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <Grid3X3 className="w-4 h-4" />
+                        <span>Grid</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {stitchLayout === 'grid' && (
+                    <div>
+                      <div className="flex justify-between mb-2">
+                        <span className="text-sm font-medium">Grid Columns</span>
+                        <span className="text-xs font-mono text-slate-400">{stitchColumns} col(s)</span>
+                      </div>
+                      <input 
+                        type="range"
+                        min="1"
+                        max="10"
+                        value={stitchColumns}
+                        onChange={(e) => setStitchColumns(parseInt(e.target.value))}
+                        className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                      />
+                    </div>
+                  )}
+
+                  <div>
+                    <div className="flex justify-between mb-2">
+                      <span className="text-sm font-medium">Image Gap</span>
+                      <span className="text-xs font-mono text-slate-400">{stitchGap}px</span>
+                    </div>
+                    <input 
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={stitchGap}
+                      onChange={(e) => setStitchGap(parseInt(e.target.value))}
+                      className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between mb-2">
+                      <span className="text-sm font-medium">Outer Padding</span>
+                      <span className="text-xs font-mono text-slate-400">{stitchPadding}px</span>
+                    </div>
+                    <input 
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={stitchPadding}
+                      onChange={(e) => setStitchPadding(parseInt(e.target.value))}
+                      className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium block mb-2">Background Color</label>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={() => setStitchBgColor('transparent')}
+                        className={`w-8 h-8 rounded border checkerboard-bg transition-all ${stitchBgColor === 'transparent' ? 'ring-2 ring-indigo-500 border-white' : 'border-slate-700'}`}
+                        title="Transparent"
+                      />
+                      <button 
+                        onClick={() => setStitchBgColor('#ffffff')}
+                        className={`w-8 h-8 rounded border bg-white transition-all ${stitchBgColor === '#ffffff' ? 'ring-2 ring-indigo-500 border-slate-400' : 'border-slate-700'}`}
+                        title="White"
+                      />
+                      <button 
+                        onClick={() => setStitchBgColor('#000000')}
+                        className={`w-8 h-8 rounded border bg-black transition-all ${stitchBgColor === '#000000' ? 'ring-2 ring-indigo-500 border-slate-400' : 'border-slate-700'}`}
+                        title="Black"
+                      />
+                      <button 
+                        onClick={() => setStitchBgColor('#0f172a')}
+                        className={`w-8 h-8 rounded border bg-[#0f172a] transition-all ${stitchBgColor === '#0f172a' ? 'ring-2 ring-indigo-500 border-slate-400' : 'border-slate-700'}`}
+                        title="Slate Dark"
+                      />
+                      <input 
+                        type="color"
+                        value={stitchBgColor.startsWith('#') ? stitchBgColor : '#000000'}
+                        onChange={(e) => setStitchBgColor(e.target.value)}
+                        className="w-8 h-8 bg-transparent cursor-pointer rounded border border-slate-700"
+                        title="Custom Color"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block mb-2">Alignment</label>
+                    <div className="flex bg-slate-800 p-0.5 rounded-lg border border-slate-700 justify-between">
+                      <button 
+                        onClick={() => setStitchAlignment('start')}
+                        className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${stitchAlignment === 'start' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+                      >
+                        Start
+                      </button>
+                      <button 
+                        onClick={() => setStitchAlignment('center')}
+                        className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${stitchAlignment === 'center' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+                      >
+                        Center
+                      </button>
+                      <button 
+                        onClick={() => setStitchAlignment('end')}
+                        className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${stitchAlignment === 'end' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'}`}
+                      >
+                        End
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block mb-2">Resizing Mode</label>
+                    <div className="space-y-2">
+                      <button 
+                        onClick={() => setStitchResizeMode('match-max')}
+                        className={`w-full py-2 px-3 text-left rounded text-xs font-medium border transition-all flex items-center justify-between ${
+                          stitchResizeMode === 'match-max' ? 'bg-indigo-600/20 border-indigo-500 text-white font-semibold' : 'bg-slate-800 border-slate-700 text-slate-300'
+                        }`}
+                      >
+                        Scale to Match Tallest/Widest
+                        <CheckCircle2 className={`w-4 h-4 ${stitchResizeMode === 'match-max' ? 'text-indigo-400' : 'opacity-0'}`} />
+                      </button>
+                      <button 
+                        onClick={() => setStitchResizeMode('match-min')}
+                        className={`w-full py-2 px-3 text-left rounded text-xs font-medium border transition-all flex items-center justify-between ${
+                          stitchResizeMode === 'match-min' ? 'bg-indigo-600/20 border-indigo-500 text-white font-semibold' : 'bg-slate-800 border-slate-700 text-slate-300'
+                        }`}
+                      >
+                        Scale to Match Shortest/Narrowest
+                        <CheckCircle2 className={`w-4 h-4 ${stitchResizeMode === 'match-min' ? 'text-indigo-400' : 'opacity-0'}`} />
+                      </button>
+                      <button 
+                        onClick={() => setStitchResizeMode('original')}
+                        className={`w-full py-2 px-3 text-left rounded text-xs font-medium border transition-all flex items-center justify-between ${
+                          stitchResizeMode === 'original' ? 'bg-indigo-600/20 border-indigo-500 text-white font-semibold' : 'bg-slate-800 border-slate-700 text-slate-300'
+                        }`}
+                      >
+                        Original Dimensions (No Stretch)
+                        <CheckCircle2 className={`w-4 h-4 ${stitchResizeMode === 'original' ? 'text-indigo-400' : 'opacity-0'}`} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {stitchFiles.length > 0 && (
+                    <div className="pt-4 border-t border-slate-800">
+                      <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block mb-3 flex justify-between items-center">
+                        <span>Items ({stitchFiles.length})</span>
+                        <span className="text-[10px] text-slate-500 italic">Order/Transforms</span>
+                      </label>
+                      <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar">
+                        {stitchFiles.map((item, idx) => (
+                          <div key={item.id} className="bg-slate-800/80 border border-slate-700/60 rounded p-2 flex items-center gap-2 group">
+                            <div className="w-10 h-10 shrink-0 bg-slate-900 rounded border border-slate-700 flex items-center justify-center overflow-hidden checkerboard-bg shadow">
+                              <img src={item.previewUrl} alt="prev" className="max-w-full max-h-full object-contain" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <input 
+                                type="text"
+                                value={item.name}
+                                onChange={(e) => {
+                                  setStitchFiles(prev => prev.map(f => f.id === item.id ? { ...f, name: e.target.value } : f));
+                                }}
+                                className="w-full bg-transparent text-xs text-slate-200 outline-none border-b border-transparent focus:border-indigo-500 truncate"
+                              />
+                              <span className="text-[9px] font-mono text-slate-500">{item.width}x{item.height}</span>
+                            </div>
+                            <div className="flex flex-col gap-1 shrink-0">
+                              <div className="flex gap-1 justify-end">
+                                <button 
+                                  onClick={() => moveStitchFile(idx, 'up')}
+                                  disabled={idx === 0}
+                                  className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 disabled:opacity-20 text-[10px]"
+                                  title="Move Up"
+                                >
+                                  ▲
+                                </button>
+                                <button 
+                                  onClick={() => moveStitchFile(idx, 'down')}
+                                  disabled={idx === stitchFiles.length - 1}
+                                  className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 disabled:opacity-20 text-[10px]"
+                                  title="Move Down"
+                                >
+                                  ▼
+                                </button>
+                              </div>
+                              <div className="flex gap-1 justify-end">
+                                <button 
+                                  onClick={() => rotateStitchFile(item.id, 90)}
+                                  className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-indigo-400"
+                                  title="Rotate 90"
+                                >
+                                  <RotateCw className="w-2.5 h-2.5" />
+                                </button>
+                                <button 
+                                  onClick={() => flipStitchFile(item.id, 'h')}
+                                  className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-indigo-400"
+                                  title="Flip Horizontal"
+                                >
+                                  <FlipHorizontal className="w-2.5 h-2.5" />
+                                </button>
+                                <button 
+                                  onClick={() => removeStitchFile(item.id)}
+                                  className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-red-400"
+                                  title="Remove"
+                                >
+                                  <Trash2 className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                </div>
+              </aside>
+            )}
           </>
         )}
 
         {/* === MAIN WORKSPACE === */}
-        {currentTool !== 'bg-remover' ? (
+        {currentTool === 'splitter' || currentTool === 'ai-expand' ? (
           <main 
             className={`flex-1 bg-[#0f172a] relative overflow-auto transition-colors duration-300 ${dragActive ? 'bg-indigo-500/10' : ''}`}
             onDragEnter={handleDrag}
@@ -1993,7 +2830,7 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                     </div>
                   )}
                 </main>
-              ) : (
+              ) : currentTool === 'bg-remover' ? (
                 <main className="flex-1 bg-[#0f172a] p-8 overflow-y-auto flex flex-col relative w-full">
             <div className="max-w-6xl mx-auto w-full flex flex-col gap-8 pb-16">
               
@@ -2161,6 +2998,228 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                   ))}
                 </div>
               )}
+            </div>
+          </main>
+        ) : (
+          <main className="flex-1 bg-[#0f172a] p-8 overflow-y-auto flex flex-col relative w-full">
+            <div className="max-w-6xl mx-auto w-full flex flex-col gap-8 pb-16">
+              
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 border-b border-slate-800 pb-6">
+                <div>
+                  <h2 className="text-2xl font-semibold mb-2 flex items-center gap-2">
+                    <Grid3X3 className="w-6 h-6 text-indigo-400" />
+                    Combine &amp; Stitch Image Pieces
+                  </h2>
+                  <p className="text-slate-400 max-w-2xl text-sm leading-relaxed">
+                    Upload multiple images (pieces) and merge them into a single image. Adjust the layout, columns, custom spacing, outer padding, and order of each piece to compile your collage.
+                  </p>
+                </div>
+
+                {stitchFiles.length > 0 && (
+                  <div className="flex gap-2 shrink-0">
+                    <button 
+                      onClick={() => {
+                        const input = stitchFileInputRef.current;
+                        if (input) input.click();
+                      }}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Add Pieces
+                    </button>
+                    {libraryItems.length > 0 && (
+                      <button 
+                        onClick={() => {
+                          const newStitchFiles = libraryItems.map(item => {
+                            const file = new File([item.blob], item.name, { type: item.blob.type });
+                            return {
+                              id: Math.random().toString(36).substring(2, 9) + Date.now(),
+                              file,
+                              previewUrl: URL.createObjectURL(item.blob),
+                              width: 300,
+                              height: 300,
+                              rotation: 0,
+                              flipH: false,
+                              flipV: false,
+                              name: item.name.substring(0, item.name.lastIndexOf('.')) || 'slice'
+                            };
+                          });
+                          setStitchFiles(prev => [...prev, ...newStitchFiles]);
+                        }}
+                        className="px-4 py-2 bg-slate-800/60 hover:bg-slate-700 text-yellow-400 border border-yellow-500/20 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                        title="Add all pieces currently stored in your library"
+                      >
+                        <Archive className="w-4 h-4" />
+                        Import Library ({libraryItems.length})
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {stitchFiles.length === 0 ? (
+                <div className="w-full flex-1 flex flex-col items-center justify-center min-h-[450px]">
+                  <motion.div 
+                    initial={{ opacity: 0, y: 15 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.4 }}
+                    className="w-full max-w-2xl space-y-6"
+                  >
+                    <div 
+                      onDragEnter={handleStitchDrag}
+                      onDragOver={handleStitchDrag}
+                      onDragLeave={handleStitchDrag}
+                      onDrop={handleStitchDrop}
+                      onClick={() => stitchFileInputRef.current?.click()}
+                      className={`relative flex flex-col items-center justify-center w-full min-h-[320px] border-2 border-dashed rounded-2xl transition-all duration-300 cursor-pointer overflow-hidden ${
+                        dragActive ? 'border-indigo-500 bg-indigo-500/10 scale-[1.01]' : 'border-slate-700 bg-slate-800/35 hover:border-slate-500 hover:bg-slate-800/50'
+                      }`}
+                    >
+                      <input 
+                        ref={stitchFileInputRef}
+                        type="file"
+                        multiple
+                        accept="image/png, image/jpeg, image/webp"
+                        className="hidden"
+                        onChange={handleStitchFileChange}
+                      />
+                      <div className="flex flex-col items-center text-center p-8 pointer-events-none">
+                        <div className="w-16 h-16 rounded-2xl bg-indigo-500/15 border border-indigo-500/20 text-indigo-400 flex items-center justify-center mb-6 shadow-indigo-500/5 shadow-inner">
+                          <Plus className="w-8 h-8" />
+                        </div>
+                        <h3 className="text-xl font-semibold mb-2 text-white">Upload image pieces</h3>
+                        <p className="text-slate-400 max-w-sm mb-6 text-sm">
+                          Drag and drop your image files here, or click to browse. Select multiple files to combine them.
+                        </p>
+                        <span className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium text-sm shadow-lg pointer-events-auto transition-colors">
+                          Select Pieces
+                        </span>
+                      </div>
+                    </div>
+
+                    {libraryItems.length > 0 && (
+                      <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 text-center shadow-inner flex flex-col items-center">
+                        <div className="flex items-center gap-2 mb-3 text-slate-300 font-semibold text-sm">
+                          <Archive className="w-4 h-4 text-yellow-500" />
+                          <span>Use Previously Crop/Saved Pieces</span>
+                        </div>
+                        <p className="text-xs text-slate-400 max-w-sm mb-4 leading-relaxed">
+                          We found some pieces in your **Library**. You can import and stitch them together immediately!
+                        </p>
+                        <button 
+                          onClick={() => {
+                            const newStitchFiles = libraryItems.map(item => {
+                              const file = new File([item.blob], item.name, { type: item.blob.type });
+                              return {
+                                id: Math.random().toString(36).substring(2, 9) + Date.now(),
+                                file,
+                                previewUrl: URL.createObjectURL(item.blob),
+                                width: 300, 
+                                height: 300,
+                                rotation: 0,
+                                flipH: false,
+                                flipV: false,
+                                name: item.name.substring(0, item.name.lastIndexOf('.')) || 'slice'
+                              };
+                            });
+                            setStitchFiles(newStitchFiles);
+                          }}
+                          className="px-4 py-2 bg-yellow-500/10 hover:bg-yellow-500 text-yellow-400 hover:text-slate-950 font-bold text-xs rounded-lg transition-all border border-yellow-500/20"
+                        >
+                          Import Savestate Slices ({libraryItems.length})
+                        </button>
+                      </div>
+                    )}
+                  </motion.div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                  {/* Left component: Preview */}
+                  <div className="lg:col-span-2 flex flex-col gap-4">
+                    <div className="flex justify-between items-center bg-slate-900 px-4 py-2 rounded-t-xl border-t border-x border-slate-800">
+                      <span className="text-xs font-semibold text-slate-400 tracking-wider uppercase font-mono">Live Stitch Compositor</span>
+                      <div className="flex gap-2">
+                        <span className="bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-[10px] px-2 py-0.5 rounded font-mono uppercase font-semibold">
+                          Canvas Size: {stitchPreviewUrl ? 'Generating...' : 'Live Canvas'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="bg-[#090d16] border border-slate-800/80 rounded-b-xl min-h-[350px] p-6 flex items-center justify-center overflow-auto checkerboard-bg relative select-none">
+                      {stitchPreviewUrl ? (
+                        <div className="relative max-w-full max-h-[500px] shadow-2xl rounded">
+                          <img 
+                            src={stitchPreviewUrl} 
+                            alt="Stitched compositor preview" 
+                            className="max-h-[500px] object-contain rounded border border-slate-800 shadow shadow-black"
+                          />
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center gap-2 text-slate-500">
+                          <RefreshCw className="w-8 h-8 animate-spin" />
+                          <span className="text-xs">Preparing compositor preview...</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right Component: Quick Rearrangement / Details */}
+                  <div className="space-y-6">
+                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow">
+                      <h3 className="text-sm font-semibold tracking-wider uppercase text-slate-400 mb-4 font-mono">Piece Layout Order</h3>
+                      <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                        To re-arrange layout sequence, use the arrows. Drag and drop uploads sequence from left-to-right (horizontal) or top-to-bottom (vertical).
+                      </p>
+                      
+                      <div className="space-y-2 max-h-[320px] overflow-y-auto custom-scrollbar pr-1">
+                        {stitchFiles.map((item, idx) => (
+                          <div key={item.id} className="bg-slate-850 border border-slate-800 rounded-lg p-2.5 flex items-center justify-between gap-3 hover:border-slate-700 transition-colors">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-xs font-mono font-bold text-slate-600 bg-slate-900 w-5 h-5 rounded-full flex items-center justify-center shrink-0">
+                                {idx + 1}
+                              </span>
+                              <div className="w-8 h-8 shrink-0 rounded bg-slate-900 border border-slate-850 overflow-hidden checkerboard-bg flex items-center justify-center">
+                                <img src={item.previewUrl} alt="" className="max-w-full max-h-full object-contain" />
+                              </div>
+                              <span className="text-xs font-medium text-slate-300 truncate" title={item.name}>
+                                {item.name}
+                              </span>
+                            </div>
+                            
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button 
+                                onClick={() => moveStitchFile(idx, 'up')}
+                                disabled={idx === 0}
+                                className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 disabled:opacity-20"
+                                title="Move Left/Up"
+                              >
+                                <ArrowUp className="w-3.5 h-3.5" />
+                              </button>
+                              <button 
+                                onClick={() => moveStitchFile(idx, 'down')}
+                                disabled={idx === stitchFiles.length - 1}
+                                className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 disabled:opacity-20"
+                                title="Move Right/Down"
+                              >
+                                <ArrowDown className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900/50 border border-slate-800/80 rounded-xl p-5 text-center flex flex-col items-center">
+                      <Wand2 className="w-5 h-5 text-indigo-400 mb-2" />
+                      <h4 className="text-xs font-mono font-bold text-slate-300 uppercase mb-1">Interactive Features</h4>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        Need fine-grained transforms like rotating individual slices or flipping? Use the controls in the Image Stitcher Sidebar panel.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
             </div>
           </main>
         )}
