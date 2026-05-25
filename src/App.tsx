@@ -5,7 +5,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import JSZip from 'jszip';
-import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical, Sparkles, Wand2, Maximize2, Archive, Library, Plus, ArrowUp, ArrowDown } from 'lucide-react';
+import { UploadCloud, Download, Image as ImageIcon, CheckCircle2, RefreshCw, X, Grid3X3, Layers, Scissors, Trash2, RotateCcw, RotateCw, ZoomIn, ZoomOut, FlipHorizontal, FlipVertical, Sparkles, Wand2, Maximize2, Archive, Library, Plus, ArrowUp, ArrowDown, Move } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
 import { removeBackgroundV2 } from './lib/bgRemoval';
@@ -22,6 +22,11 @@ type StitchFile = {
   flipH: boolean;
   flipV: boolean;
   name: string;
+  scale?: number;
+  customWidth?: number;
+  customHeight?: number;
+  offsetX?: number;
+  offsetY?: number;
 };
 
 const loadImage = (url: string): Promise<HTMLImageElement> => {
@@ -163,7 +168,7 @@ export default function App() {
 
   // -- Stitcher State --
   const [stitchFiles, setStitchFiles] = useState<StitchFile[]>([]);
-  const [stitchLayout, setStitchLayout] = useState<'horizontal' | 'vertical' | 'grid'>('horizontal');
+  const [stitchLayout, setStitchLayout] = useState<'horizontal' | 'vertical' | 'grid'>('vertical');
   const [stitchColumns, setStitchColumns] = useState<number>(2);
   const [stitchGap, setStitchGap] = useState<number>(10);
   const [stitchPadding, setStitchPadding] = useState<number>(10);
@@ -171,6 +176,80 @@ export default function App() {
   const [stitchAlignment, setStitchAlignment] = useState<'start' | 'center' | 'end'>('center');
   const [stitchResizeMode, setStitchResizeMode] = useState<'original' | 'match-max' | 'match-min'>('match-max');
   const [stitchPreviewUrl, setStitchPreviewUrl] = useState<string | null>(null);
+  const [stitchWorkspaceView, setStitchWorkspaceView] = useState<'preview' | 'interactive'>('interactive');
+  const [resizingId, setResizingId] = useState<string | null>(null);
+  const [resizeStart, setResizeStart] = useState<{ x: number; y: number; scale: number } | null>(null);
+
+  const [stitchMouseMode, setStitchMouseMode] = useState<'reorder' | 'offset'>('offset');
+  const [draggingOffsetId, setDraggingOffsetId] = useState<string | null>(null);
+  const [offsetDragStart, setOffsetDragStart] = useState<{ x: number; y: number; ox: number; oy: number } | null>(null);
+
+  useEffect(() => {
+    if (!resizingId || !resizeStart) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const dx = e.clientX - resizeStart.x;
+      // 140px of drag corresponds to a scale factor of 1.0
+      const deltaScale = dx / 140;
+      const newScale = Math.max(0.1, Math.min(5.0, resizeStart.scale + deltaScale));
+
+      setStitchFiles(prev => prev.map(f => {
+        if (f.id === resizingId) {
+          return {
+            ...f,
+            scale: parseFloat(newScale.toFixed(2))
+          };
+        }
+        return f;
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setResizingId(null);
+      setResizeStart(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [resizingId, resizeStart]);
+
+  useEffect(() => {
+    if (!draggingOffsetId || !offsetDragStart) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const dx = e.clientX - offsetDragStart.x;
+      const dy = e.clientY - offsetDragStart.y;
+
+      setStitchFiles(prev => prev.map(f => {
+        if (f.id === draggingOffsetId) {
+          return {
+            ...f,
+            offsetX: Math.round(offsetDragStart.ox + dx),
+            offsetY: Math.round(offsetDragStart.oy + dy)
+          };
+        }
+        return f;
+      }));
+    };
+
+    const handleMouseUp = () => {
+      setDraggingOffsetId(null);
+      setOffsetDragStart(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [draggingOffsetId, offsetDragStart]);
 
   // --- Splitter Logic ---
   const handleImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
@@ -1169,13 +1248,33 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
           const rotationRad = (file.rotation * Math.PI) / 180;
           const cos = Math.abs(Math.cos(rotationRad));
           const sin = Math.abs(Math.sin(rotationRad));
-          const rw = img.width * cos + img.height * sin;
-          const rh = img.width * sin + img.height * cos;
+          
+          const scaleMult = file.scale !== undefined ? file.scale : 1.0;
+          
+          // Kích thước chưa zoom (Standard scale = 1.0) để làm nền chuẩn hóa đồng bộ
+          const stdW = file.customWidth || img.width;
+          const stdH = file.customHeight || img.height;
+
+          const stdRw = stdW * cos + stdH * sin;
+          const stdRh = stdW * sin + stdH * cos;
+
+          // Kích thước cuối cùng đã nhân scale cá nhân
+          const baseW = stdW * scaleMult;
+          const baseH = stdH * scaleMult;
+
+          const rw = baseW * cos + baseH * sin;
+          const rh = baseW * sin + baseH * cos;
+
           return {
             file,
             img,
             rw,
-            rh
+            rh,
+            stdRw,
+            stdRh,
+            baseW,
+            baseH,
+            scaleMult
           };
         });
 
@@ -1198,115 +1297,123 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
         if (stitchLayout === 'horizontal') {
           let targetH = 0;
           if (stitchResizeMode === 'match-max') {
-            targetH = Math.max(...items.map(i => i.rh));
+            targetH = Math.max(...items.map(i => i.stdRh));
           } else if (stitchResizeMode === 'match-min') {
-            targetH = Math.min(...items.map(i => i.rh));
+            targetH = Math.min(...items.map(i => i.stdRh));
           } else {
             targetH = -1;
           }
 
           const scaledItems = items.map((item) => {
-            let itemH = item.rh;
-            let itemW = item.rw;
-            let scale = 1;
+            let itemH = item.stdRh;
+            let itemW = item.stdRw;
+            let matchScale = 1;
             if (targetH > 0) {
-              scale = targetH / itemH;
+              matchScale = targetH / itemH;
               itemH = targetH;
-              itemW = itemW * scale;
+              itemW = itemW * matchScale;
             }
-            return { ...item, dw: itemW, dh: itemH };
+            return {
+              ...item,
+              stdDw: itemW,
+              stdDh: itemH,
+              dw: itemW * item.scaleMult,
+              dh: itemH * item.scaleMult
+            };
           });
 
-          const maxH = Math.max(...scaledItems.map(i => i.dh));
-          canvasH = stitchPadding * 2 + maxH;
+          const maxStdH = Math.max(...scaledItems.map(i => i.stdDh));
 
           let currentX = stitchPadding;
           scaledItems.forEach((item) => {
-            let drawY = stitchPadding;
+            let stdTop = stitchPadding;
             if (stitchAlignment === 'center') {
-              drawY = stitchPadding + (maxH - item.dh) / 2;
+              stdTop = stitchPadding + (maxStdH - item.stdDh) / 2;
             } else if (stitchAlignment === 'end') {
-              drawY = stitchPadding + (maxH - item.dh);
+              stdTop = stitchPadding + (maxStdH - item.stdDh);
             }
+
+            const dx = currentX - (item.dw - item.stdDw) / 2 + (item.file.offsetX || 0);
+            const dy = stdTop - (item.dh - item.stdDh) / 2 + (item.file.offsetY || 0);
 
             drawBoxes.push({
               img: item.img,
-              dx: currentX,
-              dy: drawY,
+              dx,
+              dy,
               dw: item.dw,
               dh: item.dh,
               rotation: item.file.rotation,
               flipH: item.file.flipH,
               flipV: item.file.flipV
             });
-            currentX += item.dw + stitchGap;
+            currentX += item.stdDw + stitchGap;
           });
-          canvasW = currentX - stitchGap + stitchPadding;
-          if (canvasW < stitchPadding * 2) canvasW = stitchPadding * 2;
 
         } else if (stitchLayout === 'vertical') {
           let targetW = 0;
           if (stitchResizeMode === 'match-max') {
-            targetW = Math.max(...items.map(i => i.rw));
+            targetW = Math.max(...items.map(i => i.stdRw));
           } else if (stitchResizeMode === 'match-min') {
-            targetW = Math.min(...items.map(i => i.rw));
+            targetW = Math.min(...items.map(i => i.stdRw));
           } else {
             targetW = -1;
           }
 
           const scaledItems = items.map((item) => {
-            let itemW = item.rw;
-            let itemH = item.rh;
-            let scale = 1;
+            let itemW = item.stdRw;
+            let itemH = item.stdRh;
+            let matchScale = 1;
             if (targetW > 0) {
-              scale = targetW / itemW;
+              matchScale = targetW / itemW;
               itemW = targetW;
-              itemH = itemH * scale;
+              itemH = itemH * matchScale;
             }
-            return { ...item, dw: itemW, dh: itemH };
+            return {
+              ...item,
+              stdDw: itemW,
+              stdDh: itemH,
+              dw: itemW * item.scaleMult,
+              dh: itemH * item.scaleMult
+            };
           });
 
-          const maxW = Math.max(...scaledItems.map(i => i.dw));
-          canvasW = stitchPadding * 2 + maxW;
+          const maxStdW = Math.max(...scaledItems.map(i => i.stdDw));
 
           let currentY = stitchPadding;
           scaledItems.forEach((item) => {
-            let drawX = stitchPadding;
+            let stdLeft = stitchPadding;
             if (stitchAlignment === 'center') {
-              drawX = stitchPadding + (maxW - item.dw) / 2;
+              stdLeft = stitchPadding + (maxStdW - item.stdDw) / 2;
             } else if (stitchAlignment === 'end') {
-              drawX = stitchPadding + (maxW - item.dw);
+              stdLeft = stitchPadding + (maxStdW - item.stdDw);
             }
+
+            const dx = stdLeft - (item.dw - item.stdDw) / 2 + (item.file.offsetX || 0);
+            const dy = currentY - (item.dh - item.stdDh) / 2 + (item.file.offsetY || 0);
 
             drawBoxes.push({
               img: item.img,
-              dx: drawX,
-              dy: currentY,
+              dx,
+              dy,
               dw: item.dw,
               dh: item.dh,
               rotation: item.file.rotation,
               flipH: item.file.flipH,
               flipV: item.file.flipV
             });
-            currentY += item.dh + stitchGap;
+            currentY += item.stdDh + stitchGap;
           });
-          canvasH = currentY - stitchGap + stitchPadding;
-          if (canvasH < stitchPadding * 2) canvasH = stitchPadding * 2;
 
         } else if (stitchLayout === 'grid') {
           const cols = Math.max(1, stitchColumns);
-          const rows = Math.ceil(N / cols);
 
-          let maxCellW = Math.max(...items.map(i => i.rw));
-          let maxCellH = Math.max(...items.map(i => i.rh));
+          let maxCellW = Math.max(...items.map(i => i.stdRw));
+          let maxCellH = Math.max(...items.map(i => i.stdRh));
 
           if (stitchResizeMode === 'match-min') {
-            maxCellW = Math.min(...items.map(i => i.rw));
-            maxCellH = Math.min(...items.map(i => i.rh));
+            maxCellW = Math.min(...items.map(i => i.stdRw));
+            maxCellH = Math.min(...items.map(i => i.stdRh));
           }
-
-          canvasW = stitchPadding * 2 + cols * maxCellW + (cols - 1) * stitchGap;
-          canvasH = stitchPadding * 2 + rows * maxCellH + (rows - 1) * stitchGap;
 
           items.forEach((item, idx) => {
             const r = Math.floor(idx / cols);
@@ -1315,36 +1422,67 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
             const cellX = stitchPadding + c * (maxCellW + stitchGap);
             const cellY = stitchPadding + r * (maxCellH + stitchGap);
 
-            let drawW = item.rw;
-            let drawH = item.rh;
-            
+            let stdDw = item.stdRw;
+            let stdDh = item.stdRh;
             if (stitchResizeMode !== 'original') {
-              const scale = Math.min(maxCellW / item.rw, maxCellH / item.rh);
-              drawW = item.rw * scale;
-              drawH = item.rh * scale;
+              const matchScale = Math.min(maxCellW / item.stdRw, maxCellH / item.stdRh);
+              stdDw = item.stdRw * matchScale;
+              stdDh = item.stdRh * matchScale;
             }
 
-            let drawX = cellX;
-            let drawY = cellY;
+            const dw = stdDw * item.scaleMult;
+            const dh = stdDh * item.scaleMult;
+
+            let stdLeft = cellX;
+            let stdTop = cellY;
 
             if (stitchAlignment === 'center') {
-              drawX = cellX + (maxCellW - drawW) / 2;
-              drawY = cellY + (maxCellH - drawH) / 2;
+              stdLeft = cellX + (maxCellW - stdDw) / 2;
+              stdTop = cellY + (maxCellH - stdDh) / 2;
             } else if (stitchAlignment === 'end') {
-              drawX = cellX + (maxCellW - drawW);
-              drawY = cellY + (maxCellH - drawH);
+              stdLeft = cellX + (maxCellW - stdDw);
+              stdTop = cellY + (maxCellH - stdDh);
             }
+
+            const dx = stdLeft - (dw - stdDw) / 2 + (item.file.offsetX || 0);
+            const dy = stdTop - (dh - stdDh) / 2 + (item.file.offsetY || 0);
 
             drawBoxes.push({
               img: item.img,
-              dx: drawX,
-              dy: drawY,
-              dw: drawW,
-              dh: drawH,
+              dx,
+              dy,
+              dw,
+              dh,
               rotation: item.file.rotation,
               flipH: item.file.flipH,
               flipV: item.file.flipV
             });
+          });
+        }
+
+        // Calculate the bounding box of all drawn items to design perfect canvas dimensions
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        drawBoxes.forEach((box) => {
+          if (box.dx < minX) minX = box.dx;
+          if (box.dy < minY) minY = box.dy;
+          if (box.dx + box.dw > maxX) maxX = box.dx + box.dw;
+          if (box.dy + box.dh > maxY) maxY = box.dy + box.dh;
+        });
+
+        if (drawBoxes.length > 0 && minX !== Infinity) {
+          canvasW = (maxX - minX) + stitchPadding * 2;
+          canvasH = (maxY - minY) + stitchPadding * 2;
+
+          const shiftX = stitchPadding - minX;
+          const shiftY = stitchPadding - minY;
+
+          drawBoxes.forEach((box) => {
+            box.dx += shiftX;
+            box.dy += shiftY;
           });
         }
 
@@ -2232,6 +2370,33 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                         End
                       </button>
                     </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block mb-2">Tương Tác Chuột (Drag Mode)</label>
+                    <div className="flex bg-slate-800 p-0.5 rounded-lg border border-slate-700 justify-between">
+                      <button 
+                        onClick={() => setStitchMouseMode('reorder')}
+                        className={`w-1/2 py-1.5 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${stitchMouseMode === 'reorder' ? 'bg-indigo-600 text-white shadow-sm font-semibold' : 'text-slate-400 hover:text-white'}`}
+                        title="Drag and drop elements to prioritize/rearrange order sequence on canvas"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        Sắp thứ tự
+                      </button>
+                      <button 
+                        onClick={() => setStitchMouseMode('offset')}
+                        className={`w-1/2 py-1.5 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${stitchMouseMode === 'offset' ? 'bg-indigo-600 text-white shadow-sm font-semibold' : 'text-slate-400 hover:text-white'}`}
+                        title="Directly pull and drag slices manually with pointer tool custom coordinates offsets"
+                      >
+                        <Move className="w-3.5 h-3.5" />
+                        Dịch tự do
+                      </button>
+                    </div>
+                    {stitchMouseMode === 'offset' && (
+                      <div className="mt-2.5 p-2 bg-slate-800/40 border border-slate-700/60 rounded-lg text-[10px] text-slate-400 font-medium leading-relaxed">
+                        💡 Click & kéo trực tiếp mảnh ảnh bất kỳ trên bảng tương tác để di chuyển. Bạn có thể nhấn nút <strong className="text-indigo-400">“Xoá dịch chuyển”</strong> để khôi phục vị trí ban đầu.
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -3136,31 +3301,202 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                   {/* Left component: Preview */}
                   <div className="lg:col-span-2 flex flex-col gap-4">
-                    <div className="flex justify-between items-center bg-slate-900 px-4 py-2 rounded-t-xl border-t border-x border-slate-800">
-                      <span className="text-xs font-semibold text-slate-400 tracking-wider uppercase font-mono">Live Stitch Compositor</span>
+                    <div className="flex justify-between items-center bg-slate-900 px-4 py-2 rounded-t-xl border-t border-x border-slate-800 font-mono">
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs font-semibold text-slate-400 tracking-wider uppercase font-mono">Workspace View</span>
+                        <div className="flex items-center bg-slate-800 p-0.5 rounded border border-slate-700 ml-2">
+                          <button
+                            onClick={() => setStitchWorkspaceView('preview')}
+                            className={`px-2 py-1 text-[10px] font-bold rounded ${stitchWorkspaceView === 'preview' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                          >
+                            Finished Canvas
+                          </button>
+                          <button
+                            onClick={() => setStitchWorkspaceView('interactive')}
+                            className={`px-2 py-1 text-[10px] font-bold rounded flex items-center gap-1.5 ${stitchWorkspaceView === 'interactive' ? 'bg-indigo-600 text-white font-semibold' : 'text-slate-400 hover:text-white'}`}
+                            title="Di chuyển tự do mảnh và kéo góc dưới phải để chỉnh phóng to/thu nhỏ bằng chuột"
+                          >
+                            <Sparkles className="w-3 h-3 text-yellow-400" />
+                            Drag to Move & Resize (Di chuyển & Phóng to/Thu nhỏ)
+                          </button>
+                        </div>
+                      </div>
                       <div className="flex gap-2">
-                        <span className="bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-[10px] px-2 py-0.5 rounded font-mono uppercase font-semibold">
-                          Canvas Size: {stitchPreviewUrl ? 'Generating...' : 'Live Canvas'}
+                        <span className="bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-[10px] px-2 py-0.5" style={{ borderRadius: '4px' }}>
+                          Canvas Size: {stitchPreviewUrl ? 'Generated' : 'Live Canvas'}
                         </span>
                       </div>
                     </div>
 
-                    <div className="bg-[#090d16] border border-slate-800/80 rounded-b-xl min-h-[350px] p-6 flex items-center justify-center overflow-auto checkerboard-bg relative select-none">
-                      {stitchPreviewUrl ? (
-                        <div className="relative max-w-full max-h-[500px] shadow-2xl rounded">
-                          <img 
-                            src={stitchPreviewUrl} 
-                            alt="Stitched compositor preview" 
-                            className="max-h-[500px] object-contain rounded border border-slate-800 shadow shadow-black"
-                          />
+                    {stitchWorkspaceView === 'interactive' ? (
+                      <div className="bg-[#090d16] border border-slate-800/80 rounded-b-xl min-h-[450px] p-6 overflow-auto checkerboard-bg relative select-none flex flex-col justify-center items-center">
+                        <div className="text-center mb-6 max-w-xl">
+                          <p className="text-xs text-indigo-400 font-semibold mb-1">
+                            Bảng Tương Tác: {stitchMouseMode === 'reorder' ? 'Kéo thả đổi thứ tự' : 'Kéo thả dịch vị trí tự do'}
+                          </p>
+                          <p className="text-[10px] text-slate-500 leading-relaxed">
+                            {stitchMouseMode === 'reorder' 
+                              ? 'Kéo trực tiếp mảnh và thả lên mảnh khác để hoán đổi vị trí.' 
+                              : 'Kéo trực tiếp mảnh bất kỳ để xê dịch vị trí tự do trên trục X, Y.'
+                            }
+                            {' '}Kéo nút <strong className="text-indigo-400">↘</strong> ở góc dưới bên phải để chỉnh thu phóng (scale).
+                          </p>
+                          {stitchFiles.some(f => (f.offsetX || 0) !== 0 || (f.offsetY || 0) !== 0) && (
+                            <button
+                              onClick={() => {
+                                setStitchFiles(prev => prev.map(f => ({ ...f, offsetX: 0, offsetY: 0 })));
+                              }}
+                              className="mt-3 px-3 py-1 text-[10px] uppercase font-bold tracking-wider bg-indigo-600/25 hover:bg-indigo-600 text-indigo-200 hover:text-white rounded-md border border-indigo-500/40 transition-colors cursor-pointer"
+                            >
+                              Xoá Dịch Chuyển (Reset offsets)
+                            </button>
+                          )}
                         </div>
-                      ) : (
-                        <div className="flex flex-col items-center gap-2 text-slate-500">
-                          <RefreshCw className="w-8 h-8 animate-spin" />
-                          <span className="text-xs">Preparing compositor preview...</span>
+                        
+                        <div 
+                          className={`w-full max-w-full flex ${
+                            stitchLayout === 'horizontal' ? 'flex-row' : 
+                            stitchLayout === 'vertical' ? 'flex-col' : ''
+                          }`}
+                          style={{
+                            display: stitchLayout === 'grid' ? 'grid' : 'flex',
+                            gridTemplateColumns: stitchLayout === 'grid' ? `repeat(${stitchColumns}, minmax(0, 1fr))` : undefined,
+                            gap: `${stitchGap}px`,
+                            justifyContent: 
+                              stitchAlignment === 'start' ? 'flex-start' : 
+                              stitchAlignment === 'center' ? 'center' : 'flex-end',
+                            alignItems: 
+                              stitchAlignment === 'start' ? 'flex-start' : 
+                              stitchAlignment === 'center' ? 'center' : 'flex-end',
+                            padding: `${stitchPadding}px`,
+                            backgroundColor: stitchBgColor === 'transparent' ? 'transparent' : stitchBgColor,
+                            borderRadius: '8px',
+                          }}
+                        >
+                          {stitchFiles.map((file) => {
+                            const currentW = file.width;
+                            const currentH = file.height;
+                            const currentScale = file.scale !== undefined ? file.scale : 1.0;
+                            const isSelected = resizingId === file.id;
+                            
+                            return (
+                              <div
+                                key={file.id}
+                                draggable={stitchMouseMode === 'reorder'}
+                                onDragStart={(e) => {
+                                  if (stitchMouseMode !== 'reorder') return;
+                                  e.dataTransfer.setData("text/plain", file.id);
+                                }}
+                                onDragOver={(e) => {
+                                  if (stitchMouseMode !== 'reorder') return;
+                                  e.preventDefault();
+                                }}
+                                onDrop={(e) => {
+                                  if (stitchMouseMode !== 'reorder') return;
+                                  const draggedId = e.dataTransfer.getData("text/plain");
+                                  if (draggedId && draggedId !== file.id) {
+                                    setStitchFiles(prev => {
+                                      const next = [...prev];
+                                      const fromIdx = next.findIndex(f => f.id === draggedId);
+                                      const toIdx = next.findIndex(f => f.id === file.id);
+                                      if (fromIdx !== -1 && toIdx !== -1) {
+                                        const [moved] = next.splice(fromIdx, 1);
+                                        next.splice(toIdx, 0, moved);
+                                      }
+                                      return next;
+                                    });
+                                  }
+                                }}
+                                onMouseDown={(e) => {
+                                  if (stitchMouseMode !== 'offset') return;
+                                  const target = e.target as HTMLElement;
+                                  if (target.closest('.resize-handle')) return;
+                                  e.preventDefault();
+                                  setDraggingOffsetId(file.id);
+                                  setOffsetDragStart({
+                                    x: e.clientX,
+                                    y: e.clientY,
+                                    ox: file.offsetX || 0,
+                                    oy: file.offsetY || 0
+                                  });
+                                }}
+                                className={`relative group border rounded-lg overflow-visible bg-slate-900/40 p-1.5 flex flex-col items-center justify-center ${
+                                  stitchMouseMode === 'reorder' ? 'cursor-grab active:cursor-grabbing hover:border-indigo-500/50 hover:bg-slate-800/40' : 'cursor-move hover:border-emerald-500/50 hover:bg-slate-800/40'
+                                } ${isSelected ? 'ring-2 ring-indigo-500 border-indigo-500 shadow-md shadow-indigo-500/20' : 'border-slate-800'}`}
+                                style={{
+                                  width: '140px',
+                                  aspectRatio: `${currentW}/${currentH}`,
+                                  transform: `translate(${file.offsetX || 0}px, ${file.offsetY || 0}px) scale(${currentScale})`,
+                                  transformOrigin: 'center center',
+                                }}
+                              >
+                                {/* Active Image with rotates and flips */}
+                                <div 
+                                  className={`w-full h-full relative overflow-hidden rounded bg-slate-950/60 transition-all ${
+                                    isSelected ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/30' : ''
+                                  }`}
+                                  style={{
+                                    transform: `rotate(${file.rotation}deg) scaleX(${file.flipH ? -1 : 1}) scaleY(${file.flipV ? -1 : 1})`,
+                                  }}
+                                >
+                                  <img 
+                                    src={file.previewUrl} 
+                                    className="w-full h-full object-contain pointer-events-none" 
+                                    alt={file.name} 
+                                  />
+                                </div>
+                                
+                                {/* Info badge / Label overlay */}
+                                <div className="absolute top-2 left-2 right-2 bg-slate-950/90 backdrop-blur-sm border border-slate-800 px-2 py-1 rounded text-[9px] text-slate-300 font-mono flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                                  <span className="truncate max-w-[50px]">{file.name}</span>
+                                  <span className="text-indigo-400 font-bold">x{(file.scale || 1.0).toFixed(2)}</span>
+                                </div>
+
+                                {/* Drag-to-Resize Handle at the bottom right */}
+                                <div
+                                  onMouseDown={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setResizingId(file.id);
+                                    setResizeStart({
+                                      x: e.clientX,
+                                      y: e.clientY,
+                                      scale: currentScale
+                                    });
+                                  }}
+                                  className="absolute -bottom-1 -right-1 w-5 h-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full flex items-center justify-center cursor-se-resize shadow shadow-black hover:scale-110 active:scale-95 transition-all z-20 resize-handle"
+                                  title="Resizing Grip - Drag to scale"
+                                >
+                                  <span className="text-[10px] font-bold select-none leading-none">↘</span>
+                                </div>
+
+                                {/* Quick individual scale adjustment display */}
+                                <div className="absolute bottom-1 left-1.5 text-[8px] font-mono text-slate-400 font-semibold bg-slate-950/80 px-1 py-0.5 rounded pointer-events-none">
+                                  {Math.round(currentW * currentScale)}x{Math.round(currentH * currentScale)}
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
-                      )}
-                    </div>
+                      </div>
+                    ) : (
+                      <div className="bg-[#090d16] border border-slate-800/80 rounded-b-xl min-h-[350px] p-6 flex items-center justify-center overflow-auto checkerboard-bg relative select-none">
+                        {stitchPreviewUrl ? (
+                          <div className="relative max-w-full max-h-[500px] shadow-2xl rounded">
+                            <img 
+                              src={stitchPreviewUrl} 
+                              alt="Stitched compositor preview" 
+                              className="max-h-[500px] object-contain rounded border border-slate-800 shadow shadow-black"
+                            />
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center gap-2 text-slate-500">
+                            <RefreshCw className="w-8 h-8 animate-spin" />
+                            <span className="text-xs">Preparing compositor preview...</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* Right Component: Quick Rearrangement / Details */}
