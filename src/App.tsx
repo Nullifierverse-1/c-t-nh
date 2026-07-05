@@ -86,6 +86,64 @@ interface LibraryItem {
   previewUrl: string;
 }
 
+const getIntersection = (
+  vLine: { pos: number, angle: number } | 'left' | 'right',
+  hLine: { pos: number, angle: number } | 'top' | 'bottom',
+  W: number,
+  H: number,
+  centerY: number
+) => {
+  if (vLine === 'left' && hLine === 'top') return { x: 0, y: 0 };
+  if (vLine === 'left' && hLine === 'bottom') return { x: 0, y: H };
+  if (vLine === 'right' && hLine === 'top') return { x: W, y: 0 };
+  if (vLine === 'right' && hLine === 'bottom') return { x: W, y: H };
+
+  if (vLine === 'left') {
+    const cy = hLine === 'top' ? 0 : hLine === 'bottom' ? H : (hLine as any).pos * H;
+    const hRad = hLine === 'top' || hLine === 'bottom' ? 0 : (hLine as any).angle * Math.PI / 180;
+    const y = cy + (0 - W / 2) * Math.tan(hRad);
+    return { x: 0, y: Math.max(0, Math.min(H, y)) };
+  }
+
+  if (vLine === 'right') {
+    const cy = hLine === 'top' ? 0 : hLine === 'bottom' ? H : (hLine as any).pos * H;
+    const hRad = hLine === 'top' || hLine === 'bottom' ? 0 : (hLine as any).angle * Math.PI / 180;
+    const y = cy + (W - W / 2) * Math.tan(hRad);
+    return { x: W, y: Math.max(0, Math.min(H, y)) };
+  }
+
+  if (hLine === 'top') {
+    const cx = (vLine as any) === 'left' ? 0 : (vLine as any) === 'right' ? W : (vLine as any).pos * W;
+    const vRad = (vLine as any) === 'left' || (vLine as any) === 'right' ? 0 : (vLine as any).angle * Math.PI / 180;
+    const x = cx - (0 - centerY) * Math.tan(vRad);
+    return { x: Math.max(0, Math.min(W, x)), y: 0 };
+  }
+
+  if (hLine === 'bottom') {
+    const cx = (vLine as any) === 'left' ? 0 : (vLine as any) === 'right' ? W : (vLine as any).pos * W;
+    const vRad = (vLine as any) === 'left' || (vLine as any) === 'right' ? 0 : (vLine as any).angle * Math.PI / 180;
+    const x = cx - (H - centerY) * Math.tan(vRad);
+    return { x: Math.max(0, Math.min(W, x)), y: H };
+  }
+
+  const cx = vLine.pos * W;
+  const vRad = vLine.angle * Math.PI / 180;
+  const cy = hLine.pos * H;
+  const hRad = hLine.angle * Math.PI / 180;
+
+  const tanV = Math.tan(vRad);
+  const tanH = Math.tan(hRad);
+  const denom = 1 + tanV * tanH;
+
+  let x = (cx - (cy - centerY) * tanV + (W / 2) * tanV * tanH) / denom;
+  let y = cy + (x - W / 2) * tanH;
+
+  x = Math.max(0, Math.min(W, x));
+  y = Math.max(0, Math.min(H, y));
+
+  return { x, y };
+};
+
 export default function App() {
   const [currentTool, setCurrentTool] = useState<ToolType>('splitter');
   
@@ -132,8 +190,15 @@ export default function App() {
     [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}],
     [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}]
   ]);
-  const [hLines, setHLines] = useState<number[]>([1/3, 2/3]);
-  const [selectedLine, setSelectedLine] = useState<{ rIdx: number, cIdx: number } | null>(null);
+  const [hLines, setHLines] = useState<{ pos: number; angle: number }[]>([
+    { pos: 1/3, angle: 0 },
+    { pos: 2/3, angle: 0 }
+  ]);
+  const [selectedLine, setSelectedLine] = useState<
+    | { type: 'v'; rIdx: number; cIdx: number }
+    | { type: 'h'; idx: number }
+    | null
+  >(null);
 
   const getTotalSlices = () => {
     let total = 0;
@@ -169,7 +234,9 @@ export default function App() {
   // -- Stitcher State --
   const [stitchFiles, setStitchFiles] = useState<StitchFile[]>([]);
   const [stitchLayout, setStitchLayout] = useState<'horizontal' | 'vertical' | 'grid'>('vertical');
+  const [stitchGridMode, setStitchGridMode] = useState<'columns' | 'rows'>('rows');
   const [stitchColumns, setStitchColumns] = useState<number>(2);
+  const [stitchRows, setStitchRows] = useState<number>(4);
   const [stitchGap, setStitchGap] = useState<number>(10);
   const [stitchPadding, setStitchPadding] = useState<number>(10);
   const [stitchBgColor, setStitchBgColor] = useState<string>('#0f172a');
@@ -391,10 +458,10 @@ export default function App() {
     if (isNaN(c) || c < 1) c = 1;
     if (isNaN(r) || r < 1) r = 1;
     
-    let h: number[] = [];
+    let h: {pos: number, angle: number}[] = [];
     if (r > 0) {
       let step = 1 / r;
-      for (let i = step; i < 0.9999; i += step) h.push(i);
+      for (let i = step; i < 0.9999; i += step) h.push({pos: i, angle: 0});
       setHLines(h);
     }
     
@@ -419,7 +486,10 @@ export default function App() {
     setError(null);
     setColumnsStr("4");
     setRowsStr("3");
-    setHLines([1/3, 2/3]);
+    setHLines([
+      { pos: 1/3, angle: 0 },
+      { pos: 2/3, angle: 0 }
+    ]);
     setVLinesPerRow([
       [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}],
       [{pos: 0.25, angle: 0}, {pos: 0.5, angle: 0}, {pos: 0.75, angle: 0}],
@@ -634,10 +704,10 @@ Only output the JSON object, NO markdown formatting, NO extra text.`;
         setColumnsStr(c.toString());
         setRowsStr(r.toString());
         
-        let h: number[] = [];
+        let h: {pos: number, angle: number}[] = [];
         if (r > 0) {
           let step = 1 / r;
-          for (let i = step; i < 0.9999; i += step) h.push(i);
+          for (let i = step; i < 0.9999; i += step) h.push({pos: i, angle: 0});
           setHLines(h);
         }
         
@@ -804,7 +874,7 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
       const imgFolder = zip.folder(folderName);
       
       const slicePromises: Promise<void>[] = [];
-      const hPlacements = [0, ...[...hLines].sort((a,b)=>a-b), 1];
+      const sortedHLines = [...hLines].sort((a,b)=>a.pos-b.pos);
 
       let index = 1;
       const W = img.width;
@@ -812,21 +882,16 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
 
       const slicesToDownload = selectedPieces.size > 0 ? selectedPieces : null;
       
-      for (let row = 0; row < hPlacements.length - 1; row++) {
+      for (let row = 0; row <= sortedHLines.length; row++) {
         const rowVLines = vLinesPerRow[row] || [];
         const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
         
-        const topY = hPlacements[row] * H;
-        const bottomY = hPlacements[row + 1] * H;
-        const centerY = (topY + bottomY) / 2;
-        
-        const getXAtY = (lineInfo: {pos: number, angle: number} | 'left' | 'right', y: number) => {
-            if (lineInfo === 'left') return 0;
-            if (lineInfo === 'right') return W;
-            const cx = lineInfo.pos * W;
-            const rad = lineInfo.angle * Math.PI / 180;
-            return cx - (y - centerY) * Math.tan(rad);
-        };
+        const topHLine = row === 0 ? 'top' : sortedHLines[row - 1];
+        const bottomHLine = row === sortedHLines.length ? 'bottom' : sortedHLines[row];
+
+        const topCenterY = row === 0 ? 0 : sortedHLines[row - 1].pos * H;
+        const bottomCenterY = row === sortedHLines.length ? H : sortedHLines[row].pos * H;
+        const centerY = (topCenterY + bottomCenterY) / 2;
 
         for (let col = 0; col <= sortedLines.length; col++) {
            const currIndexZeroBased = index - 1;
@@ -836,17 +901,20 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
              const leftLine = col === 0 ? 'left' : sortedLines[col - 1];
              const rightLine = col === sortedLines.length ? 'right' : sortedLines[col];
              
-             const tlX = Math.max(0, Math.min(W, getXAtY(leftLine, topY)));
-             const blX = Math.max(0, Math.min(W, getXAtY(leftLine, bottomY)));
-             const trX = Math.max(0, Math.min(W, getXAtY(rightLine, topY)));
-             const brX = Math.max(0, Math.min(W, getXAtY(rightLine, bottomY)));
+             const ptTL = getIntersection(leftLine, topHLine, W, H, centerY);
+             const ptBL = getIntersection(leftLine, bottomHLine, W, H, centerY);
+             const ptTR = getIntersection(rightLine, topHLine, W, H, centerY);
+             const ptBR = getIntersection(rightLine, bottomHLine, W, H, centerY);
              
-             const minX = Math.max(0, Math.floor(Math.min(tlX, blX, trX, brX)));
-             const maxX = Math.min(W, Math.ceil(Math.max(tlX, blX, trX, brX)));
+             const minX = Math.max(0, Math.floor(Math.min(ptTL.x, ptBL.x, ptTR.x, ptBR.x)));
+             const maxX = Math.min(W, Math.ceil(Math.max(ptTL.x, ptBL.x, ptTR.x, ptBR.x)));
              
+             const topY = Math.min(ptTL.y, ptTR.y);
+             const bottomY = Math.max(ptBL.y, ptBR.y);
+
              const slicePromise = new Promise<void>((resolve, reject) => {
-                 const sliceW = Math.round(maxX - minX);
-                 const sliceH = Math.round(bottomY - topY);
+                 const sliceW = Math.max(1, Math.round(maxX - minX));
+                 const sliceH = Math.max(1, Math.round(bottomY - topY));
                  
                  const pieceIndexKey = index - 1;
                  const t = pieceTransforms[pieceIndexKey] || { rotation: 0, flipH: false, flipV: false };
@@ -866,10 +934,10 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
   
                  // Polygon crop for slanted cuts
                  ctx.beginPath();
-                 ctx.moveTo(Math.round(tlX - minX), 0);
-                 ctx.lineTo(Math.round(trX - minX), 0);
-                 ctx.lineTo(Math.round(brX - minX), sliceH);
-                 ctx.lineTo(Math.round(blX - minX), sliceH);
+                 ctx.moveTo(Math.round(ptTL.x - minX), Math.round(ptTL.y - topY));
+                 ctx.lineTo(Math.round(ptTR.x - minX), Math.round(ptTR.y - topY));
+                 ctx.lineTo(Math.round(ptBR.x - minX), Math.round(ptBR.y - topY));
+                 ctx.lineTo(Math.round(ptBL.x - minX), Math.round(ptBL.y - topY));
                  ctx.closePath();
                  ctx.clip();
                  
@@ -946,28 +1014,23 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
       
       const newItems: LibraryItem[] = [];
       const slicePromises: Promise<void>[] = [];
-      const hPlacements = [0, ...[...hLines].sort((a,b)=>a-b), 1];
+      const sortedHLines = [...hLines].sort((a,b)=>a.pos-b.pos);
       
       let index = 1;
       const W = img.width;
       const H = img.height;
       const slicesToSave = selectedPieces.size > 0 ? selectedPieces : null;
       
-      for (let row = 0; row < hPlacements.length - 1; row++) {
+      for (let row = 0; row <= sortedHLines.length; row++) {
         const rowVLines = vLinesPerRow[row] || [];
         const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
         
-        const topY = hPlacements[row] * H;
-        const bottomY = hPlacements[row + 1] * H;
-        const centerY = (topY + bottomY) / 2;
-        
-        const getXAtY = (lineInfo: {pos: number, angle: number} | 'left' | 'right', y: number) => {
-            if (lineInfo === 'left') return 0;
-            if (lineInfo === 'right') return W;
-            const cx = lineInfo.pos * W;
-            const rad = lineInfo.angle * Math.PI / 180;
-            return cx - (y - centerY) * Math.tan(rad);
-        };
+        const topHLine = row === 0 ? 'top' : sortedHLines[row - 1];
+        const bottomHLine = row === sortedHLines.length ? 'bottom' : sortedHLines[row];
+
+        const topCenterY = row === 0 ? 0 : sortedHLines[row - 1].pos * H;
+        const bottomCenterY = row === sortedHLines.length ? H : sortedHLines[row].pos * H;
+        const centerY = (topCenterY + bottomCenterY) / 2;
 
         for (let col = 0; col <= sortedLines.length; col++) {
            const currIndexZeroBased = index - 1;
@@ -977,17 +1040,20 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
              const leftLine = col === 0 ? 'left' : sortedLines[col - 1];
              const rightLine = col === sortedLines.length ? 'right' : sortedLines[col];
              
-             const tlX = Math.max(0, Math.min(W, getXAtY(leftLine, topY)));
-             const blX = Math.max(0, Math.min(W, getXAtY(leftLine, bottomY)));
-             const trX = Math.max(0, Math.min(W, getXAtY(rightLine, topY)));
-             const brX = Math.max(0, Math.min(W, getXAtY(rightLine, bottomY)));
+             const ptTL = getIntersection(leftLine, topHLine, W, H, centerY);
+             const ptBL = getIntersection(leftLine, bottomHLine, W, H, centerY);
+             const ptTR = getIntersection(rightLine, topHLine, W, H, centerY);
+             const ptBR = getIntersection(rightLine, bottomHLine, W, H, centerY);
              
-             const minX = Math.max(0, Math.floor(Math.min(tlX, blX, trX, brX)));
-             const maxX = Math.min(W, Math.ceil(Math.max(tlX, blX, trX, brX)));
+             const minX = Math.max(0, Math.floor(Math.min(ptTL.x, ptBL.x, ptTR.x, ptBR.x)));
+             const maxX = Math.min(W, Math.ceil(Math.max(ptTL.x, ptBL.x, ptTR.x, ptBR.x)));
+             
+             const topY = Math.min(ptTL.y, ptTR.y);
+             const bottomY = Math.max(ptBL.y, ptBR.y);
              
              const slicePromise = new Promise<void>((resolve, reject) => {
-                 const sliceW = Math.round(maxX - minX);
-                 const sliceH = Math.round(bottomY - topY);
+                 const sliceW = Math.max(1, Math.round(maxX - minX));
+                 const sliceH = Math.max(1, Math.round(bottomY - topY));
                  
                  const pieceIndexKey = index - 1;
                  const t = pieceTransforms[pieceIndexKey] || { rotation: 0, flipH: false, flipV: false };
@@ -1005,10 +1071,10 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                  ctx.translate(-sliceW / 2, -sliceH / 2);
   
                  ctx.beginPath();
-                 ctx.moveTo(Math.round(tlX - minX), 0);
-                 ctx.lineTo(Math.round(trX - minX), 0);
-                 ctx.lineTo(Math.round(brX - minX), sliceH);
-                 ctx.lineTo(Math.round(blX - minX), sliceH);
+                 ctx.moveTo(Math.round(ptTL.x - minX), Math.round(ptTL.y - topY));
+                 ctx.lineTo(Math.round(ptTR.x - minX), Math.round(ptTR.y - topY));
+                 ctx.lineTo(Math.round(ptBR.x - minX), Math.round(ptBR.y - topY));
+                 ctx.lineTo(Math.round(ptBL.x - minX), Math.round(ptBL.y - topY));
                  ctx.closePath();
                  ctx.clip();
                  
@@ -1405,7 +1471,9 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
           });
 
         } else if (stitchLayout === 'grid') {
-          const cols = Math.max(1, stitchColumns);
+          const useRowsMode = stitchGridMode === 'rows';
+          const rowsCount = Math.max(1, stitchRows);
+          const colsCount = useRowsMode ? Math.ceil(items.length / rowsCount) : Math.max(1, stitchColumns);
 
           let maxCellW = Math.max(...items.map(i => i.stdRw));
           let maxCellH = Math.max(...items.map(i => i.stdRh));
@@ -1416,8 +1484,15 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
           }
 
           items.forEach((item, idx) => {
-            const r = Math.floor(idx / cols);
-            const c = idx % cols;
+            let r = 0;
+            let c = 0;
+            if (useRowsMode) {
+              c = Math.floor(idx / rowsCount);
+              r = idx % rowsCount;
+            } else {
+              r = Math.floor(idx / colsCount);
+              c = idx % colsCount;
+            }
 
             const cellX = stitchPadding + c * (maxCellW + stitchGap);
             const cellY = stitchPadding + r * (maxCellH + stitchGap);
@@ -2042,24 +2117,46 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                   {selectedLine && (
                     <div className="space-y-4 mb-8">
                       <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 block flex justify-between items-center">
-                        Column Line Angle
+                        {selectedLine.type === 'v' ? 'Column Line Angle' : 'Row Line Angle'}
                         <button onClick={() => setSelectedLine(null)} className="text-slate-500 hover:text-white"><X className="w-4 h-4" /></button>
                       </label>
                       <div className="p-3 bg-indigo-500/10 border border-indigo-500/20 rounded-md">
+                        <div className="flex justify-between text-xs text-slate-400 mb-1">
+                          <span>Angle:</span>
+                          <span className="font-semibold text-white">
+                            {selectedLine.type === 'v' 
+                              ? `${vLinesPerRow[selectedLine.rIdx]?.[selectedLine.cIdx]?.angle || 0}°` 
+                              : `${hLines[selectedLine.idx]?.angle || 0}°`}
+                          </span>
+                        </div>
                         <input
                           type="range"
                           min="-75"
                           max="75"
-                          value={vLinesPerRow[selectedLine.rIdx][selectedLine.cIdx].angle}
+                          value={selectedLine.type === 'v' 
+                            ? (vLinesPerRow[selectedLine.rIdx]?.[selectedLine.cIdx]?.angle || 0) 
+                            : (hLines[selectedLine.idx]?.angle || 0)}
                           onChange={(e) => {
                             const val = parseInt(e.target.value);
-                            setVLinesPerRow(prev => {
-                              const next = [...prev];
-                              const nextRow = [...(next[selectedLine.rIdx] || [])];
-                              nextRow[selectedLine.cIdx] = { ...nextRow[selectedLine.cIdx], angle: val };
-                              next[selectedLine.rIdx] = nextRow;
-                              return next;
-                            });
+                            if (selectedLine.type === 'v') {
+                              setVLinesPerRow(prev => {
+                                const next = [...prev];
+                                const nextRow = [...(next[selectedLine.rIdx] || [])];
+                                if (nextRow[selectedLine.cIdx]) {
+                                  nextRow[selectedLine.cIdx] = { ...nextRow[selectedLine.cIdx], angle: val };
+                                }
+                                next[selectedLine.rIdx] = nextRow;
+                                return next;
+                              });
+                            } else {
+                              setHLines(prev => {
+                                const next = [...prev];
+                                if (next[selectedLine.idx]) {
+                                  next[selectedLine.idx] = { ...next[selectedLine.idx], angle: val };
+                                }
+                                return next;
+                              });
+                            }
                           }}
                           className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                         />
@@ -2269,19 +2366,66 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                   </div>
 
                   {stitchLayout === 'grid' && (
-                    <div>
-                      <div className="flex justify-between mb-2">
-                        <span className="text-sm font-medium">Grid Columns</span>
-                        <span className="text-xs font-mono text-slate-400">{stitchColumns} col(s)</span>
+                    <div className="space-y-4">
+                      <div>
+                        <label className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 block mb-2">Chế Độ Grid (Grid Mode)</label>
+                        <div className="flex bg-slate-800 p-0.5 rounded-lg border border-slate-700 justify-between">
+                          <button 
+                            type="button"
+                            onClick={() => setStitchGridMode('columns')}
+                            className={`w-1/2 py-1 text-[11px] rounded transition-all font-medium ${stitchGridMode === 'columns' ? 'bg-indigo-600 text-white shadow-sm font-semibold' : 'text-slate-400 hover:text-white'}`}
+                          >
+                            Cố định Cột (Cols)
+                          </button>
+                          <button 
+                            type="button"
+                            onClick={() => setStitchGridMode('rows')}
+                            className={`w-1/2 py-1 text-[11px] rounded transition-all font-medium ${stitchGridMode === 'rows' ? 'bg-indigo-600 text-white shadow-sm font-semibold' : 'text-slate-400 hover:text-white'}`}
+                          >
+                            Cố định Hàng (Rows)
+                          </button>
+                        </div>
                       </div>
-                      <input 
-                        type="range"
-                        min="1"
-                        max="10"
-                        value={stitchColumns}
-                        onChange={(e) => setStitchColumns(parseInt(e.target.value))}
-                        className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                      />
+
+                      <div>
+                        <div className="flex justify-between mb-1.5">
+                          <span className={`text-xs font-semibold ${stitchGridMode === 'columns' ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}>
+                            Số cột (Grid Columns)
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-400">{stitchColumns} col(s)</span>
+                        </div>
+                        <input 
+                          type="range"
+                          min="1"
+                          max="10"
+                          value={stitchColumns}
+                          onChange={(e) => {
+                            setStitchColumns(parseInt(e.target.value));
+                            setStitchGridMode('columns');
+                          }}
+                          className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between mb-1.5">
+                          <span className={`text-xs font-semibold ${stitchGridMode === 'rows' ? 'text-indigo-400 font-bold' : 'text-slate-400'}`}>
+                            Số hàng (Grid Rows)
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-400">{stitchRows} row(s)</span>
+                        </div>
+                        <input 
+                          type="range"
+                          min="1"
+                          max="10"
+                          value={stitchRows}
+                          onChange={(e) => {
+                            setStitchRows(parseInt(e.target.value));
+                            setStitchGridMode('rows');
+                          }}
+                          className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                        />
+                      </div>
                     </div>
                   )}
 
@@ -2708,7 +2852,8 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                           {imageSize && (
                             <div className="absolute top-0 left-0 right-0 bottom-0">
                               {(() => {
-                                 const hP = [0, ...[...hLines].sort((a,b)=>a-b), 1];
+                                 const sortedHLines = [...hLines].sort((a,b)=>a.pos-b.pos);
+                                 const hP = [0, ...sortedHLines.map(hl => hl.pos), 1];
                                  return hP.slice(0, -1).map((startH, rIdx) => {
                                    const endH = hP[rIdx + 1];
                                    const rowVLines = vLinesPerRow[rIdx] || [];
@@ -2720,7 +2865,7 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                                        style={{ top: `${startH * 100}%`, height: `${(endH - startH) * 100}%` }}
                                      >
                                        {rowVLines.map((v, cIdx) => {
-                                         const isSelected = selectedLine?.rIdx === rIdx && selectedLine?.cIdx === cIdx;
+                                         const isSelected = selectedLine?.type === 'v' && selectedLine?.rIdx === rIdx && selectedLine?.cIdx === cIdx;
                                          return (
                                          <div
                                            key={`v-${rIdx}-${cIdx}`}
@@ -2734,7 +2879,7 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                                            }}
                                        onClick={(e) => {
                                           e.stopPropagation();
-                                          setSelectedLine({ rIdx, cIdx });
+                                          setSelectedLine({ type: 'v', rIdx, cIdx });
                                        }}
                                        onMouseDown={(e) => {
                                          e.preventDefault();
@@ -2770,37 +2915,48 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                                  });
                               })()}
                               
-                              {hLines.map((h, i) => (
-                                <div
-                                  key={`h-${i}`}
-                                  className="absolute left-0 right-0 h-4 -mt-2 cursor-row-resize flex flex-col justify-center group/line z-10"
-                                  style={{ top: `${h * 100}%` }}
-                                  onMouseDown={(e) => {
-                                    e.preventDefault();
-                                    const startY = e.clientY;
-                                    const startVal = hLines[i];
-                                    const rect = imageElementRef.current?.getBoundingClientRect();
-                                    if (!rect) return;
-                                    const handleMouseMove = (me: MouseEvent) => {
-                                      const delta = me.clientY - startY;
-                                      const newVal = Math.max(0, Math.min(1, startVal + delta / rect.height));
-                                      setHLines(prev => {
-                                          const next = [...prev];
-                                          next[i] = newVal;
-                                          return next;
-                                      });
-                                    };
-                                    const handleMouseUp = () => {
-                                      window.removeEventListener('mousemove', handleMouseMove);
-                                      window.removeEventListener('mouseup', handleMouseUp);
-                                    };
-                                    window.addEventListener('mousemove', handleMouseMove);
-                                    window.addEventListener('mouseup', handleMouseUp);
-                                  }}
-                                >
-                                  <div className="h-[1.5px] w-full bg-green-500/80 group-hover/line:bg-green-400 group-hover/line:h-[3px] transition-all shadow-[0_0_3px_rgba(0,0,0,0.5)]"></div>
-                                </div>
-                              ))}
+                              {hLines.map((h, i) => {
+                                const isSelected = selectedLine?.type === 'h' && selectedLine?.idx === i;
+                                return (
+                                  <div
+                                    key={`h-${i}`}
+                                    className={`absolute left-0 right-0 h-8 -mt-4 cursor-row-resize flex flex-col justify-center group/line pointer-events-auto ${isSelected ? 'z-20' : 'z-10'}`}
+                                    style={{ 
+                                      top: `${h.pos * 100}%`,
+                                      transform: `rotate(${h.angle}deg)`,
+                                      transformOrigin: 'center center'
+                                    }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSelectedLine({ type: 'h', idx: i });
+                                    }}
+                                    onMouseDown={(e) => {
+                                      e.preventDefault();
+                                      const startY = e.clientY;
+                                      const startVal = h.pos;
+                                      const rect = imageElementRef.current?.getBoundingClientRect();
+                                      if (!rect) return;
+                                      const handleMouseMove = (me: MouseEvent) => {
+                                        const delta = me.clientY - startY;
+                                        const newVal = Math.max(0, Math.min(1, startVal + delta / rect.height));
+                                        setHLines(prev => {
+                                            const next = [...prev];
+                                            next[i] = { ...next[i], pos: newVal };
+                                            return next;
+                                        });
+                                      };
+                                      const handleMouseUp = () => {
+                                        window.removeEventListener('mousemove', handleMouseMove);
+                                        window.removeEventListener('mouseup', handleMouseUp);
+                                      };
+                                      window.addEventListener('mousemove', handleMouseMove);
+                                      window.addEventListener('mouseup', handleMouseUp);
+                                    }}
+                                  >
+                                    <div className={`h-[1.5px] w-full ${isSelected ? 'bg-indigo-400 shadow-[0_0_8px_theme(colors.indigo.500)] h-[3px]' : 'bg-green-500/80 shadow-[0_0_3px_rgba(0,0,0,0.5)] group-hover/line:bg-green-400 group-hover/line:h-[3px]'} transition-all pointer-events-none`}></div>
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
                         </div>
@@ -2820,38 +2976,36 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                           >
                              {(() => {
                                 if (!imageSize) return null;
-                                const hP = [0, ...[...hLines].sort((a,b)=>a-b), 1];
+                                const sortedHLines = [...hLines].sort((a,b)=>a.pos-b.pos);
+                                const totalRows = sortedHLines.length + 1;
                                 let sliceIndex = 0;
                                 const W = imageSize.width;
                                 const H = imageSize.height;
     
-                                return hP.slice(0, -1).map((startH, rIdx) => {
-                                    const endH = hP[rIdx + 1];
-                                    const topY = startH * H;
-                                    const bottomY = endH * H;
-                                    const centerY = (topY + bottomY) / 2;
+                                return Array.from({ length: totalRows }).map((_, rIdx) => {
+                                    const topHLine = rIdx === 0 ? 'top' : sortedHLines[rIdx - 1];
+                                    const bottomHLine = rIdx === sortedHLines.length ? 'bottom' : sortedHLines[rIdx];
+
+                                    const topCenterY = rIdx === 0 ? 0 : sortedHLines[rIdx - 1].pos * H;
+                                    const bottomCenterY = rIdx === sortedHLines.length ? H : sortedHLines[rIdx].pos * H;
+                                    const centerY = (topCenterY + bottomCenterY) / 2;
                                     
                                     const rowVLines = vLinesPerRow[rIdx] || [];
                                     const sortedLines = [...rowVLines].sort((a,b)=>a.pos-b.pos);
                                     
-                                    const getXAtY = (lineInfo: {pos: number, angle: number} | 'left' | 'right', y: number) => {
-                                        if (lineInfo === 'left') return 0;
-                                        if (lineInfo === 'right') return W;
-                                        const cx = lineInfo.pos * W;
-                                        const rad = lineInfo.angle * Math.PI / 180;
-                                        return cx - (y - centerY) * Math.tan(rad);
-                                    };
-    
                                     return sortedLines.concat('right' as any).map((rightLine, cIdx) => {
                                         const leftLine = cIdx === 0 ? 'left' : sortedLines[cIdx - 1];
                                         
-                                        const tlX = Math.max(0, Math.min(W, getXAtY(leftLine as any, topY)));
-                                        const blX = Math.max(0, Math.min(W, getXAtY(leftLine as any, bottomY)));
-                                        const trX = Math.max(0, Math.min(W, getXAtY(rightLine as any, topY)));
-                                        const brX = Math.max(0, Math.min(W, getXAtY(rightLine as any, bottomY)));
+                                        const ptTL = getIntersection(leftLine as any, topHLine as any, W, H, centerY);
+                                        const ptBL = getIntersection(leftLine as any, bottomHLine as any, W, H, centerY);
+                                        const ptTR = getIntersection(rightLine as any, topHLine as any, W, H, centerY);
+                                        const ptBR = getIntersection(rightLine as any, bottomHLine as any, W, H, centerY);
                                         
-                                        const minX = Math.floor(Math.min(tlX, blX, trX, brX));
-                                        const maxX = Math.ceil(Math.max(tlX, blX, trX, brX));
+                                        const minX = Math.max(0, Math.floor(Math.min(ptTL.x, ptBL.x, ptTR.x, ptBR.x)));
+                                        const maxX = Math.min(W, Math.ceil(Math.max(ptTL.x, ptBL.x, ptTR.x, ptBR.x)));
+                                        
+                                        const topY = Math.min(ptTL.y, ptTR.y);
+                                        const bottomY = Math.max(ptBL.y, ptBR.y);
                                         
                                         const sliceW = Math.max(1, maxX - minX);
                                         const sliceH = Math.max(1, bottomY - topY);
@@ -2861,12 +3015,12 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                                         const isSelected = selectedPieces.has(currIndex);
                                         
                                         const explodeX = (cIdx - sortedLines.length / 2) * 12;
-                                        const explodeY = (rIdx - (hP.length - 1) / 2) * 12;
+                                        const explodeY = (rIdx - totalRows / 2) * 12;
     
-                                        const pTL = { x: ((tlX - minX) / sliceW) * 100, y: 0 };
-                                        const pTR = { x: ((trX - minX) / sliceW) * 100, y: 0 };
-                                        const pBR = { x: ((brX - minX) / sliceW) * 100, y: 100 };
-                                        const pBL = { x: ((blX - minX) / sliceW) * 100, y: 100 };
+                                        const pTL = { x: ((ptTL.x - minX) / sliceW) * 100, y: ((ptTL.y - topY) / sliceH) * 100 };
+                                        const pTR = { x: ((ptTR.x - minX) / sliceW) * 100, y: ((ptTR.y - topY) / sliceH) * 100 };
+                                        const pBR = { x: ((ptBR.x - minX) / sliceW) * 100, y: ((ptBR.y - topY) / sliceH) * 100 };
+                                        const pBL = { x: ((ptBL.x - minX) / sliceW) * 100, y: ((ptBL.y - topY) / sliceH) * 100 };
                                         
                                         const bgPosX = Math.abs(W - sliceW) < 0.1 ? 0 : (minX / (W - sliceW)) * 100;
                                         const bgPosY = Math.abs(H - sliceH) < 0.1 ? 0 : (topY / (H - sliceH)) * 100;
@@ -3360,7 +3514,9 @@ Ensure the expanded areas are photorealistic, seamless, and perfectly match the 
                           }`}
                           style={{
                             display: stitchLayout === 'grid' ? 'grid' : 'flex',
-                            gridTemplateColumns: stitchLayout === 'grid' ? `repeat(${stitchColumns}, minmax(0, 1fr))` : undefined,
+                            gridTemplateColumns: stitchLayout === 'grid' && stitchGridMode === 'columns' ? `repeat(${stitchColumns}, minmax(0, 1fr))` : undefined,
+                            gridTemplateRows: stitchLayout === 'grid' && stitchGridMode === 'rows' ? `repeat(${stitchRows}, minmax(0, 1fr))` : undefined,
+                            gridAutoFlow: stitchLayout === 'grid' && stitchGridMode === 'rows' ? 'column' : undefined,
                             gap: `${stitchGap}px`,
                             justifyContent: 
                               stitchAlignment === 'start' ? 'flex-start' : 
